@@ -30,21 +30,30 @@ def kernelRBF(Z, rbf, band):
 
 
 # dimensionless log kernel
-def B_matrix(Z):
+def B_matrix_old(Z):
     N = Z.shape[0]
     B = np.zeros((N, N))
     for entry in list(product(range(N), repeat=2)):
         i, j = entry
-        # delta = Z[i, :] - Z[j,:]
+        # delta = Z[i, :] - Z[j, :]
         # -0.5 * delta.T @ delta
         B[i, j] = -0.5 * np.dot((Z[i, :] - Z[j, :]).T, (Z[i, :] - Z[j, :]))
     return B
 
+# only marginally faster than B_matrix_old (uses more memory)
+def B_matrix(Z):
+    return -0.5 * np.sum((Z[None, :, :] - Z[:, None, :]) ** 2, axis=2)
+
+# faster than B_matrix() but gives oddly different results end-to-end.
+def B_matrix_new(Z):
+    ZZ = np.sum(Z * Z, axis=1)
+    return -0.5 * ZZ[:, None] + np.dot(Z, Z.T) - 0.5 * ZZ[None, :]
+    
 # -------------------------------------------------------------------------------
 # optimization of latent variables
 # -------------------------------------------------------------------------------
 
-def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var):  
+def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, good_labels = False):  
     
     N = Z_initial.shape[0]
     Q = Z_initial.shape[1]
@@ -55,35 +64,40 @@ def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var):
     kernel1 = kernelRBF(Z, theta_rbf, theta_band)
     kernel2 = kernelRBF(Z, gamma_rbf, gamma_band)
     
+    # fix variances to be the same at all pixels!
+    K1C = kernel1 + C_pix
+    log_K1C_det = np.linalg.slogdet(K1C)[1]
+    K1C_inv = np.linalg.inv(K1C)
+    
     Lx, Ly, gradLx, gradLy = 0., 0., 0., 0.
     for d in range(D):
-        K1C = kernel1 + np.diag(X_var[:, d])
-        Lx += LxOrLy(K1C, X[:, d])   
-        gradLx += dLdZ(X[:, d], Z, K1C, theta_rbf, theta_band)        
+        # K1C = kernel1 + np.diag(X_var[:, d])
+        Lx += LxOrLy(log_K1C_det, K1C_inv, X[:, d])   
+        gradLx += dLdZ(X[:, d], Z, K1C_inv, kernel1, theta_band)        
         
     for l in range(L):
+        good_stars = good_labels[:, l]
+        #K2C = kernel2[good_stars, good_stars] + np.diag(Y_var[good_stars, l])
         K2C = kernel2 + np.diag(Y_var[:, l])
-        Ly += LxOrLy(K2C, Y[:, l]) 
-        gradLy += dLdZ(Y[:, l], Z, K2C, gamma_rbf, gamma_band)    
-        
-    #for n in range(N):
-    #    Lz += -0.5 * np.log(2*np.pi) -0.5 * np.dot(Z[n, :].T, Z[n, :])
-    #    dlnpdZ += -1. * Z[n, :]
+        log_K2C_det = np.linalg.slogdet(K2C)[1]
+        K2C_inv = np.linalg.inv(K2C)
+        Ly += LxOrLy(log_K2C_det, K2C_inv, Y[:, l]) 
+        gradLy += dLdZ(Y[:, l], Z, K2C_inv, kernel2, gamma_band, good_stars)    
         
     Lz = -0.5 * np.log(2.*np.pi) - 0.5 * np.sum(Z**2)
     dlnpdZ = -Z 
     L = Lx + Ly + Lz   
     gradL = gradLx + gradLy + dlnpdZ      
     gradL = np.reshape(gradL, (N * Q, ))   # reshape gradL back into 1D array   
-    print -2.*Lx, -2.*Ly, -2.*Lz
+    print(-2.*Lx, -2.*Ly, -2.*Lz)
     
-    return -2.*L, -2.*gradL#, -2.*Lx, -2.*np.reshape(gradLx, (N * Q, )), -2.*Ly, -2.*np.reshape(gradLy, (N * Q, )), -2.*Lz, -2.*np.reshape(dlnpdZ, (N * Q, ))
+    return -2.*L, -2.*gradL
 
 
-def LxOrLy(K, data):  
-    L_term1 = -0.5 * data.shape[0] * np.log(2.*np.pi)   # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!
-    L_term2 = -0.5 * np.linalg.slogdet(K)[1]            # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!
-    L_term3 = -0.5 * np.matrix.trace(np.dot(np.linalg.inv(K), np.dot(data, data.T)))
+def LxOrLy(log_K_det, K_inv, data):  
+    L_term1 = -0.5 * data.shape[0] * np.log(2.*np.pi)    # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!
+    L_term2 = -0.5 * log_K_det                           # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!    
+    L_term3 = -0.5 * np.matrix.trace(np.dot(K_inv, np.dot(data, data.T)))
     return L_term1 + L_term2 + L_term3
 
 # -------------------------------------------------------------------------------
@@ -91,10 +105,8 @@ def LxOrLy(K, data):
 # -------------------------------------------------------------------------------
 
 # derivative of the kernel with respect to the latent variables Z
-def dKdZ(Z, rbf, band):
-    kernel = kernelRBF(Z, rbf, band)
-    A = A_matrix(Z)
-    grad_dKdZ = band * kernel[:, :, None, None] * A
+def dKdZ(Z, K, band):
+    grad_dKdZ = band * K[:, :, None, None] * A_matrix(Z)
     return grad_dKdZ
 
 
@@ -110,17 +122,31 @@ def A_matrix(Z):
     return A 
 
 
-def dLdK(K, data):   
-    inv_K = np.linalg.inv(K)
-    grad_dLdK = -0.5 * inv_K + 0.5 * (np.dot(np.dot(inv_K, np.dot(data, data.T)), inv_K)) # first term * data.shape[1], if more than one dimension!
+def dLdK(K_inv, data):   
+    grad_dLdK = -0.5 * K_inv + 0.5 * (np.dot(np.dot(K_inv, np.dot(data, data.T)), K_inv)) # first term * data.shape[1], if more than one dimension!
     return grad_dLdK                     # shape: N x N 
     
 
-
-def dLdZ(data, Z, KC, rbf, band):       
-    grad_dKdZ = dKdZ(Z, rbf, band)
-    grad_dLdK = dLdK(KC, data)    
+def dLdZ_old(data, Z, K_inv, K, band, good_stars = False):       
+    grad_dKdZ = dKdZ(Z, K, band)
+    grad_dLdK = dLdK(K_inv, data)
+    #print grad_dKdZ.shape, grad_dLdK.shape
+    #gradL = np.zeros_like(Z)
+    #gradL[good_stars, :] = np.sum(grad_dLdK[:, :, None, None] * grad_dKdZ[good_stars, good_stars, good_stars, :], axis = (0, 1))
+    #gradL = np.sum(grad_dLdK[:, :, None, None] * grad_dKdZ[good_stars, good_stars, :, :], axis = (0, 1))
     gradL = np.sum(grad_dLdK[:, :, None, None] * grad_dKdZ, axis = (0, 1))
+    #print gradL.shape
+    return gradL
+
+def dLdZ(data, Z, K_inv, K, band, good_stars = False):       
+    grad_dLdK = dLdK(K_inv, data)
+    gradL = np.zeros_like(Z)
+    N, Q = Z.shape
+    prefactor = grad_dLdK * band * K
+    for l in range(N):
+        foo = prefactor[:, l, None] * (Z[:, :] - Z[None, l, :])
+        bar = prefactor[l, :, None] * (Z[:, :] - Z[l, None, :])
+        gradL[l, :] += np.sum(foo + bar, axis = 0)        
     return gradL
 
 
@@ -158,7 +184,7 @@ def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var):
         L = Lx + Ly + Lz
         gradL = np.hstack((gradLx, gradLy))
         
-        print -2.*Lx, -2.*Ly 
+        print(-2.*Lx, -2.*Ly) 
         return -2.*L, -2.*gradL
     else:
         print('hyper parameters negative!') 
@@ -180,7 +206,7 @@ def dLdhyper(data, Z, band, rbf, K, KC):
 # -------------------------------------------------------------------------------
 
 def mean_var(Z, Zj, data, data_var, K, rbf, band):
-    N = data.shape[0]
+    N = Z.shape[0]
     B = np.zeros((N, ))
     for i in range(N):
         B[i] = -0.5 * np.dot((Z[i, :] - Zj).T, (Z[i, :] - Zj))   
@@ -206,7 +232,7 @@ def mean_var(Z, Zj, data, data_var, K, rbf, band):
     
 
 
-def lnL(pars, X_new_j, X_new_var_j, Z, data, data_var, K, rbf, band):    
+def lnL_znew(pars, X_new_j, X_new_var_j, Z, data, data_var, K, rbf, band):    
     Zj = pars
     D = X_new_j.shape[0]
     
@@ -244,22 +270,63 @@ def dmusigma2dZ(data, inv_K, Z, Zj, k_Z_zj, band):
     return dmudZ, dsigma2dZ
 
 
-def predictX(N_new, X_new, X_new_var, X, X_var, Z_final, K, hyper_params):
+def predictX(N_new, X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params):
     
     Q = Z_final.shape[1]
+    L = Y.shape[1]
     theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params
+    K1 = kernelRBF(Z_final, theta_rbf, theta_band)
+    K2 = kernelRBF(Z_final, gamma_rbf, gamma_band)
     Z_new = np.zeros((N_new, Q))
+    Y_new = np.zeros((N_new, L))
     # first guess: 
-    x0 = np.mean(Z_final, axis = 0)
+    z0 = np.mean(Z_final, axis = 0)
+    y0 = np.mean(Y, axis = 0)
+    #z0, y0 = FindNeighbour(Z_final, X_new, X, X_new_var, X_var, Y)
     
     for j in range(N_new):
-        res = op.minimize(lnL, x0 = x0, args = (X_new[j, :], X_new_var[j, :], Z_final, X, X_var, K, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
+        res = op.minimize(lnL_znew, x0 = z0, args = (X_new[j, :], X_new_var[j, :], Z_final, X, X_var, K1, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
                        options={'gtol':1e-12, 'ftol':1e-12})   
         Z_new[j, :] = res.x
-        print('success: {}'.format(res.success))
+        success_z = res.success
+        print('latent variable optimization - success: {}'.format(res.success))
+        
+        res = op.minimize(lnL_ynew, x0 = y0, args = (Z_new[j, :], Z_final, Y, Y_var, K2, gamma_rbf, gamma_band), method = 'L-BFGS-B', jac = True, 
+                       options={'gtol':1e-12, 'ftol':1e-12})   
+        Y_new[j, :] = res.x
+        success_y = res.success
+        print('new labels optimization - success: {}'.format(res.success))        
     
-    return Z_new
+    return Z_new, Y_new, success_z, success_y
 
+
+def lnL_ynew(pars, Zj, Z, data, data_var, K, rbf, band):    
+    
+    lj = pars
+    L = data.shape[1]
+    
+    like = 0.
+    gradL = []
+    for l in range(L):
+        mean, var, k_Z_zj, inv_K = mean_var(Z, Zj, data[:, l], data_var[:, l], K, rbf, band)
+        #assert var > 0.
+
+        like += -0.5 * np.dot((lj[l] - mean).T, (lj[l] - mean)) / var - 0.5 * np.log(var) 
+        
+        gradL.append( -(lj[l] - mean)/var )
+    
+    return -2.*like, -2.*np.array(gradL)
+
+
+def FindNeighbour(Z_final, X_new, X, X_new_var, X_var, Y):
+    
+    # minimize chi^2 here!    
+    closest_n = min(X, key=lambda x:abs(x - X_new))
+    index = Y.index(closest_n)
+    z0 = Z_final[index]
+    y0 = Y[index]
+    
+    return z0, y0
 
 # -------------------------------------------------------------------------------
 # data
@@ -294,6 +361,9 @@ def get_pivots_and_scales(label_vals):
 
 
 def PCAInitial(X, Q):
+    #N = X.shape[0]
     pca = PCA(Q)
     Z_initial = pca.fit_transform(X)
+    # take mean as first component, i.e. 1 as first guess for each star!
+    #Z_initial_complete = np.hstack((np.ones((N, 1)), Z_initial))
     return Z_initial

@@ -9,6 +9,7 @@ Created on Mon Nov 13 11:58:25 2017
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
+matplotlib.use('Agg')
 import scipy.optimize as op
 import seaborn as sns
 import time
@@ -35,12 +36,14 @@ fsize = 14
 # -------------------------------------------------------------------------------
 
 # loading training labels
-f = open('/Users/eilers/Dropbox/cygnet/data/training_labels_apogee_tgas.pickle', 'r')
+#f = open('/Users/eilers/Dropbox/cygnet/data/training_labels_apogee_tgas.pickle', 'r')
+f = open('data/training_labels_apogee_tgas.pickle', 'r')
 training_labels = pickle.load(f)
 f.close()
 
 # loading normalized spectra
-f = open('/Users/eilers/Dropbox/cygnet/data/apogee_spectra_norm.pickle', 'r')    
+#f = open('/Users/eilers/Dropbox/cygnet/data/apogee_spectra_norm.pickle', 'r')
+f = open('data/apogee_spectra_norm.pickle', 'r')        
 spectra = pickle.load(f)
 f.close()
 
@@ -87,6 +90,13 @@ latex["C_FE"] = r"$\rm [C/Fe]$"
 latex["N_FE"] = r"$\rm [N/Fe]$"
 latex["Q_MAG"] = r"$Q$"
 
+plot_limits = {}
+plot_limits['TEFF'] = (3000, 7000)
+plot_limits['FE_H'] = (-2.5, 1)
+plot_limits['LOGG'] = (0, 2.1)
+plot_limits['ALPHA_FE'] = (-.2, .6)
+plot_limits['KMAG_ABS'] = (-1, -6)
+
 labels = np.array(['TEFF', 'FE_H', 'LOGG']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
 Nlabels = len(labels)
 latex_labels = [latex[l] for l in labels]
@@ -104,20 +114,20 @@ print('scales: {}'.format(scales))
 # constants
 # -------------------------------------------------------------------------------
 
-N = 50           # number of stars
-D = 50          # number of pixels
+N = 50            # number of stars
+D = 1000            # number of pixels
 Q = 3             # number latent dimensions, Q<=L
 L = 3             # number of labels
 pixel = np.arange(D)
-wl_start = 1600   
+wl_start = 500   
 
-theta_rbf, gamma_rbf = 1., 1. #np.pi, np.pi
-theta_band, gamma_band = 1e-3, 0.1 #np.pi, np.pi 
+theta_rbf, gamma_rbf = 0.1, 100. #np.pi, np.pi
+theta_band, gamma_band = 1e-6, 1e-5 #np.pi, np.pi 
 #theta_rbf, gamma_rbf = 1.24584922e-01, 6.22569702e+01
 #theta_band, gamma_band = 6.36293913e+02, 3.12092146e+02
 
-name = '{0}_{1}_{2}_{3}_nohyper'.format(theta_rbf, theta_band, gamma_rbf, gamma_band)
-date = '20-11-17'
+name = '{0}_{1}_{2}_{3}_Q{4}_pixels1000'.format(theta_rbf, theta_band, gamma_rbf, gamma_band, Q)
+date = 'optimizing_hyperparameters' # 'Q_tests' #
 
 # -------------------------------------------------------------------------------
 # take random indices
@@ -130,17 +140,44 @@ ind_train = np.random.choice(np.arange(fluxes.shape[0]), (N,))
 # input data
 # -------------------------------------------------------------------------------
 
-X = fluxes[ind_train, wl_start:wl_start+D] - 1.
+# subtract median spectrum from fluxes
+X_orig = fluxes[ind_train, wl_start:wl_start+D] 
+X_mean = np.median(X_orig, axis = 0)        
+X = X_orig - X_mean
+
+# plot the mean!          
+          
 X_var = 1./ivars[ind_train, wl_start:wl_start+D]
 Y = tr_label_input_scaled[ind_train, :]
 Y_var = tr_var_input_scaled[ind_train, :]
 
-# not necessary?
-#Y = np.zeros((N, Q))
-#Y_var = np.ones((N, Q)) * 100.                      # large variance for missing labels...
-#Y[:, L] = tr_label_input_scaled[ind_train, :]
-#Y_var[:, L] = 1./tr_ivar_input_scaled[ind_train, :]
+# -------------------------------------------------------------------------------
+# construct one covariance matrix for all pixels with median inverse covariance for each star
+# -------------------------------------------------------------------------------
 
+med_var = np.median(X_var, axis = 1)
+C_pix = np.diag(med_var)
+
+# inverse!
+#med_inv_var = np.median(1./X_var, axis = 1)
+#C_inv = np.diag(med_inv_var)
+
+# -------------------------------------------------------------------------------
+# contrsuct NxD boolean object which is True, if data is good. 
+# -------------------------------------------------------------------------------
+
+good_data = np.ones((N, D), dtype = bool)
+for n in range(N):
+    for d in range(D):
+        if 1./X_var[n, d] < 100.:
+            good_data[n, d] = False
+
+
+good_labels = np.ones((N, L), dtype = bool)
+for n in range(N):
+    for l in range(L):
+        if 1./Y_var[n, l] < 1.:
+            good_labels[n, l] = False
 
 # -------------------------------------------------------------------------------
 # initialize parameters
@@ -149,9 +186,9 @@ Y_var = tr_var_input_scaled[ind_train, :]
 hyper_params = np.array([theta_rbf, theta_band, gamma_rbf, gamma_band])
 
 
-Z_initial = np.zeros((N, Q)) 
-Z_initial[:, :L] = Y[:]
-#Z_initial = PCAInitial(X, Q)            # PCA initialize
+#Z_initial = np.zeros((N, Q)) 
+#Z_initial[:, :L] = Y[:]
+Z_initial = PCAInitial(X, Q)            # PCA initialize, use mean as first component, i.e. 1 as initial guess for Z_initial for each star
 Z = np.reshape(Z_initial, (N*Q,))
 
 # -------------------------------------------------------------------------------
@@ -178,12 +215,12 @@ for t in range(max_iter):
     
     # optimize Z
     print("optimizing latent parameters")
-    res = op.minimize(lnL_Z, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var), method = 'L-BFGS-B', jac = True, 
+    res = op.minimize(lnL_Z, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, good_labels), method = 'L-BFGS-B', jac = True, 
                       options={'gtol':1e-12, 'ftol':1e-12})
              
     # update Z
     Z = res.x
-    print res
+    print(res)
     print('success: {}'.format(res.success))
     # print('new Z: {}'.format(res.x))
 
@@ -195,59 +232,12 @@ kernel1 = kernelRBF(Z_final, theta_rbf, theta_band)
 kernel2 = kernelRBF(Z_final, gamma_rbf, theta_band)
 
 # -------------------------------------------------------------------------------
-# visualisation
+# inferring new labels of training objects  
 # -------------------------------------------------------------------------------
 
-# plot separately for all labels!
-plt.figure(figsize=(6, 6))
-plt.tick_params(axis=u'both', direction='in', which='both')
-plt.scatter(np.reshape(Z_initial, (N*Q,)), Z, zorder=10)
-plt.plot([-5, 5], [-5, 5], linestyle = '--', color=colors[2], zorder=5)
-plt.xlim(-4, 4)
-plt.ylim(-4, 4)
-plt.xlabel('initial labels', fontsize = fsize)
-plt.ylabel('inferred labels', fontsize = fsize)
-plt.title('iteration {}'.format(t+1), fontsize = fsize)
-plt.close()
-
-# plot separately for all labels!
-for i, l in enumerate(labels):
-    q = 0
-    plt.figure(figsize=(8, 6))
-    plt.tick_params(axis=u'both', direction='in', which='both')
-    cm = plt.cm.get_cmap('viridis')
-    sc = plt.scatter(Z_final[:, q], Z_final[:, q+1], c = Y[:, i], marker = 'o', cmap = cm)
-    cbar = plt.colorbar(sc)
-    cbar.set_label(r'{}'.format(latex[l]), rotation=270, size=fsize, labelpad = 10)
-    #plt.xlim(-4, 4)
-    #plt.ylim(-4, 4)
-    plt.xlabel(r'latent dimension {}'.format(q), fontsize = fsize)
-    plt.ylabel(r'latent dimension {}'.format(q+1), fontsize = fsize)
-    plt.title(r'#stars: {0}, #pixels: {1}, #labels: {2}, #latent dim.: {3}, $\theta_{{band}} = {4}$, $\theta_{{rbf}} = {5}$'.format(N, D, L, Q, theta_band, theta_rbf), fontsize=fsize)
-    plt.savefig('plots/{0}/Latent2Label_{1}_{2}.png'.format(date, l, name))
-    plt.close()
-
-# self project
-j = 2
-mean, var, foo = mean_var(Z_final, Z_final[j, :], X, X_var, kernel1, theta_rbf, theta_band)
-chi2 = np.sum((X[j, :] - mean)**2/X_var[j, :])
-plt.figure(figsize=(8, 6))
-plt.tick_params(axis=u'both', direction='in', which='both')
-plt.plot(wl[wl_start:wl_start+D], X[j, :], label='original data', color='k')
-plt.fill_between(wl[wl_start:wl_start+D], X[j, :] - 0.5*np.sqrt(X_var[j, :]), X[j, :] + 0.5*np.sqrt(X_var[j, :]), color='k', alpha = .3)
-plt.plot(wl[wl_start:wl_start+D], mean, label=r'GPLVM model' + '\n $\chi^2\sim{}$'.format(round(chi2, 5)), color='r')
-plt.fill_between(wl[wl_start:wl_start+D], mean - 0.5*np.sqrt(var), mean + 0.5*np.sqrt(var), color='r', alpha = .3)
-plt.title(r'star {0}: $\theta_{{\rm band}} = {1},\,\theta_{{\rm rbf}} = {2}$'.format(ind_train[j], theta_band, theta_rbf), fontsize = fsize)
-plt.legend(frameon = True)
-plt.xlabel('wavelength', fontsize = fsize)
-plt.ylabel('data', fontsize = fsize)
-plt.savefig('plots/{0}/data_model_{1}.png'.format(date, name))
-plt.close()       
-       
-# inferring labels!  
 mean_labels = np.zeros_like(Y)
 for j in range(N):   
-    mean, var, foo = mean_var(Z_final, Z_final[j, :], Y, Y_var, kernel2, theta_rbf, theta_band)
+    mean, var, foo = mean_var(Z_final, Z_final[j, :], Y, Y_var, kernel2, gamma_rbf, gamma_band)
     mean_labels[j, :] = mean
 
 # rescale labels:
@@ -257,14 +247,52 @@ for l in range(L):
     mean_labels_rescaled[:, l] = mean_labels[:, l] * scales[l] + pivots[l]
     Y_rescaled[:, l] = Y[:, l] * scales[l] + pivots[l]
     
+# -------------------------------------------------------------------------------
+# visualisation
+# -------------------------------------------------------------------------------
 
-plot_limits = {}
-plot_limits['TEFF'] = (3000, 7000)
-plot_limits['FE_H'] = (-2.5, 1)
-plot_limits['LOGG'] = (0, 2.1)
-plot_limits['ALPHA_FE'] = (-.2, .6)
-plot_limits['KMAG_ABS'] = (-1, -6)
+# latent space color coded by labels
+for i, l in enumerate(labels):
+    q = 1
+    plt.figure(figsize=(9, 6))
+    plt.tick_params(axis=u'both', direction='in', which='both')
+    cm = plt.cm.get_cmap('viridis')
+    sc = plt.scatter(Z_final[:, q], Z_final[:, q+1], c = Y[:, i], marker = 'o', cmap = cm)
+    cbar = plt.colorbar(sc)
+    cbar.set_label(r'{}'.format(latex[l]), rotation=270, size=fsize, labelpad = 10)
+    #plt.xlim(-4, 4)
+    #plt.ylim(-4, 4)
+    plt.xlabel(r'latent dimension {}'.format(q), fontsize = fsize)
+    plt.ylabel(r'latent dimension {}'.format(q+1), fontsize = fsize)
+    plt.title(r'#stars: {0}, #pixels: {1}, #labels: {2}, #latent dim.: {3}, $\theta_{{band}} = {4}$, $\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(N, D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=12)
+    plt.tight_layout()
+    plt.savefig('plots/{0}/Latent2Label_{1}_{2}.png'.format(date, l, name))
+    plt.close()
 
+# data and model for training object
+j = 2
+mean, var, foo = mean_var(Z_final, Z_final[j, :], X, X_var, kernel1, theta_rbf, theta_band)
+chi2 = np.sum((X[j, :] - mean)**2/X_var[j, :])
+#plt.figure(figsize=(8, 6))
+fig, ax = plt.subplots(ncols = 2, nrows = 1, figsize = (16, 6))
+plt.title(r'star {0}: $\theta_{{\rm band}} = {1},\,\theta_{{\rm rbf}} = {2}$'.format(ind_train[j], theta_band, theta_rbf), fontsize = fsize)
+ax[0].tick_params(axis=u'both', direction='in', which='both')
+ax[0].plot(wl[wl_start:wl_start+D], X_orig[j, :], label='original data', color='k')
+ax[0].fill_between(wl[wl_start:wl_start+D], X_orig[j, :] - 0.5*np.sqrt(X_var[j, :]), X_orig[j, :] + 0.5*np.sqrt(X_var[j, :]), color='k', alpha = .3)
+ax[0].plot(wl[wl_start:wl_start+D], mean + X_mean, label=r'GPLVM model' + '\n $\chi^2\sim{}$'.format(round(chi2, 5)), color='r')
+ax[0].fill_between(wl[wl_start:wl_start+D], mean + X_mean - 0.5*np.sqrt(var), mean + X_mean + 0.5*np.sqrt(var), color='r', alpha = .3)
+ax[0].legend(frameon = True)
+ax[0].set_xlabel('wavelength', fontsize = fsize)
+ax[0].set_ylabel('data', fontsize = fsize)
+ax[1].tick_params(axis=u'both', direction='in', which='both')
+ax[1].set_xlabel('wavelength', fontsize = fsize)
+ax[1].plot(wl[wl_start:wl_start+D], X[j, :], label='original data', color='k')
+ax[1].fill_between(wl[wl_start:wl_start+D], X[j, :] - 0.5*np.sqrt(X_var[j, :]), X[j, :] + 0.5*np.sqrt(X_var[j, :]), color='k', alpha = .3)
+ax[1].plot(wl[wl_start:wl_start+D], mean, label=r'GPLVM model' + '\n $\chi^2\sim{}$'.format(round(chi2, 5)), color='r')
+ax[1].fill_between(wl[wl_start:wl_start+D], mean - 0.5*np.sqrt(var), mean + 0.5*np.sqrt(var), color='r', alpha = .3)
+plt.savefig('plots/{0}/data_model_{1}_{2}.png'.format(date, name, j))
+plt.close()       
+    
 
 for i, l in enumerate(labels):
 
@@ -284,7 +312,7 @@ for i, l in enumerate(labels):
     plt.ylim(plot_limits[l])
     plt.tight_layout()
     plt.legend(loc=2, fontsize=14, frameon=True)
-    plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$'.format(N, D, L, Q, theta_band, theta_rbf), fontsize=fsize)
+    plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(N, D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=12)
     plt.savefig('plots/{0}/1to1_{1}_{2}.png'.format(date, l, name))
     plt.close()
 
@@ -296,53 +324,101 @@ for i, l in enumerate(labels):
 print('prediction of test object:')
 
 N_new = 1
-# new testing object
-ind_test = np.array([10, 50, 100, 188, 500, 1000, 1200, 1500, 1880, 2000]) #np.random.choice(np.arange(fluxes.shape[0]), (N_new,))
+# new testing objects
+ind_test = np.array([10, 50, 100, 188, 1000, 1200, 1500, 1880, 2000]) #np.random.choice(np.arange(fluxes.shape[0]), (N_new,))
+Y_new_test = np.zeros((len(ind_test), L))
+
 for i in range(len(ind_test)):
     ind = np.array([ind_test[i],])
-    X_new = fluxes[ind, wl_start:wl_start+D] - 1.
+    X_new = fluxes[ind, wl_start:wl_start+D] - X_mean
     X_new_var = 1./ivars[ind, wl_start:wl_start+D]
     
-    Z_new = predictX(N_new, X_new, X_new_var, X, X_var, Z_final, kernel1, hyper_params)
-    #print Z_new
+    Z_new, Y_new, success_z, success_y = predictX(N_new, X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params)
+    Y_new_test[i, :] = Y_new
     
     j = 0
     mean_new, var_new, foo = mean_var(Z_final, Z_new[j, :], X, X_var, kernel1, theta_rbf, theta_band)
     chi2_test = np.sum((X_new[j, :] - mean_new)**2/X_new_var[j, :])
     plt.figure(figsize=(8, 6))
     plt.tick_params(axis=u'both', direction='in', which='both')
-    plt.plot(wl[wl_start:wl_start+D], X_new[j, :], label='original data', color='k')
-    plt.fill_between(wl[wl_start:wl_start+D], X_new[j, :] - 0.5*np.sqrt(X_new_var[j, :]), X_new[j, :] + 0.5*np.sqrt(X_new_var[j, :]), color='k', alpha = .3)
-    plt.plot(wl[wl_start:wl_start+D], mean_new, label=r'GPLVM model' + '\n $\chi^2\sim{}$'.format(round(chi2_test, 4)), color='r')
-    plt.fill_between(wl[wl_start:wl_start+D], mean_new - 0.5*np.sqrt(var_new), mean_new + 0.5*np.sqrt(var_new), color='r', alpha = .3)
-    plt.title(r'star {0}: $\theta_{{\rm band}} = {1},\,\theta_{{\rm rbf}} = {2}$'.format(ind_test[0], theta_band, theta_rbf), fontsize = fsize)
+    plt.plot(wl[wl_start:wl_start+D], X_new[j, :] + X_mean, label='original data', color='k')
+    plt.fill_between(wl[wl_start:wl_start+D], X_new[j, :] + X_mean - 0.5*np.sqrt(X_new_var[j, :]), X_new[j, :] + X_mean + 0.5*np.sqrt(X_new_var[j, :]), color='k', alpha = .3)
+    plt.plot(wl[wl_start:wl_start+D], mean_new + X_mean, label=r'GPLVM model' + '\n $\chi^2\sim{}$'.format(round(chi2_test, 4)), color='r')
+    plt.fill_between(wl[wl_start:wl_start+D], mean_new + X_mean - 0.5*np.sqrt(var_new), mean_new + X_mean + 0.5*np.sqrt(var_new), color='r', alpha = .3)
+    plt.title(r'star {0}: $\theta_{{\rm band}} = {1},\,\theta_{{\rm rbf}} = {2},\, \gamma_{{\rm band}} = {3},\,\gamma_{{\rm rbf}} = {4}$,\, opt.: {5}'.format(ind[0], theta_band, theta_rbf, gamma_band, gamma_rbf, success_z), fontsize = 12)
     plt.legend(frameon = True)
     plt.xlabel('wavelength', fontsize = fsize)
     plt.ylabel('data', fontsize = fsize)
-    plt.savefig('plots/{0}/testing_object_{1}_{2}.png'.format(date, name, ind[0]))
+    plt.savefig('plots/{0}/testing_object_{1}_{2}.png'.format(date, name, ind_test[i]))
     plt.close()
 
-## calculate distribution of chi^2 for all spectra... (or 100 randomly chosen ones...)
+
+# testing labels    
+Y_old = tr_label_input[ind_test, :]
+Y_new_rescaled = np.zeros_like(Y_new_test)
+for l in range(L):
+    Y_new_rescaled[:, l] = Y_new_test[:, l] * scales[l] + pivots[l]
+
+for i, l in enumerate(labels):
+
+    orig = Y_old[:, i]
+    gp_values = Y_new_rescaled[:, i]
+    scatter = np.round(np.std(orig - gp_values), 5)
+    bias = np.round(np.mean(orig - gp_values), 5)    
+    
+    xx = [-10000, 10000]
+    plt.figure(figsize=(6, 6))
+    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1}'.format(bias, scatter), marker = 'o')
+    plt.plot(xx, xx, color=colors[2], linestyle='--')
+    plt.xlabel(r'reference labels {}'.format(latex[l]), size=fsize)
+    plt.ylabel(r'inferred values {}'.format(latex[l]), size=fsize)
+    plt.tick_params(axis=u'both', direction='in', which='both')
+    plt.xlim(plot_limits[l])
+    plt.ylim(plot_limits[l])
+    plt.tight_layout()
+    plt.legend(loc=2, fontsize=14, frameon=True)
+    plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(len(ind_test), D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=fsize)
+    plt.savefig('plots/{0}/1to1_test_{1}_{2}.png'.format(date, l, name))
+    plt.close()
+    
+# calculate distribution of chi^2 for all spectra... (or 100 randomly chosen ones...)
 #np.random.seed(10)
 #chis = []
 #for i in range(100):
 #    ind_test_i = np.random.choice(np.arange(len(fluxes)), (N_new,)) #np.array([ind_test[i]])
 #    print ind_test_i
-#    X_new = fluxes[ind_test_i, wl_start:wl_start+D]
+#    X_new = fluxes[ind_test_i, wl_start:wl_start+D] - X_mean
 #    X_new_var = 1./ivars[ind_test_i, wl_start:wl_start+D]    
-#    Z_new = predictX(N_new, X_new, X_new_var, X, X_var, Z_final, kernel1, hyper_params)    
+#    Z_new, Y_new, success_z, success_y = predictX(N_new, X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params)    
 #    j = 0
 #    mean_new, var_new, foo = mean_var(Z_final, Z_new[j, :], X, X_var, kernel1, theta_rbf, theta_band)
 #    chi2_test = np.sum((X_new[j, :] - mean_new)**2/X_new_var[j, :])
 #    chis.append(chi2_test)
-#plt.hist(chis, label = r'$\langle \chi^2\rangle = {0}$'.format(np.mean(chis)))
+#plt.hist(chis, label = r'$\langle \chi^2\rangle = {0}$'.format(np.median(chis)))
 #plt.tick_params(axis=u'both', direction='in', which='both')
 #plt.xlabel(r'$\chi^2$')
 #plt.ylabel('counts')
 #plt.legend(frameon=True)
 #plt.title(r'$\theta_{{rbf}} = {0}, \theta_{{band}} = {1}, \gamma_{{rbf}} = {2}, \gamma_{{band}} = {3}$'.format(theta_rbf, theta_band, gamma_rbf, gamma_band))
 #plt.savefig('plots/{0}/chis_{1}.png'.format(date, name))
-   
+
+# -------------------------------------------------------------------------------
+# more plots...
+# -------------------------------------------------------------------------------
+
+## plot separately for all labels!
+#plt.figure(figsize=(6, 6))
+#plt.tick_params(axis=u'both', direction='in', which='both')
+#plt.scatter(np.reshape(Z_initial, (N*Q,)), Z, zorder=10)
+#plt.plot([-5, 5], [-5, 5], linestyle = '--', color=colors[2], zorder=5)
+#plt.xlim(-4, 4)
+#plt.ylim(-4, 4)
+#plt.xlabel('initial labels', fontsize = fsize)
+#plt.ylabel('inferred labels', fontsize = fsize)
+#plt.title('iteration {}'.format(t+1), fontsize = fsize)
+#plt.close()   
+
+
 
 # -------------------------------------------------------------------------------
 # testing derivatives...
