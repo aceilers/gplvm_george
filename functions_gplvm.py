@@ -8,14 +8,14 @@ Created on Sun Nov 12 14:33:13 2017
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib
 import scipy.optimize as op
 import pickle
 from astropy.table import Column
 from astropy.table import Table
 from sklearn.decomposition import PCA
 from itertools import product
-
+from scipy.linalg import cho_solve, cho_factor
+from choldate import cholupdate, choldowndate
 
 
 # -------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ def B_matrix_new(Z):
 # optimization of latent variables
 # -------------------------------------------------------------------------------
 
-def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, good_labels = False):  
+def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, X_mask = None, Y_mask = None):  
     
     N = Z_initial.shape[0]
     Q = Z_initial.shape[1]
@@ -63,28 +63,44 @@ def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, good_labels 
     theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params    
     kernel1 = kernelRBF(Z, theta_rbf, theta_band)
     kernel2 = kernelRBF(Z, gamma_rbf, gamma_band)
+    if X_mask is None:
+        X_mask = np.ones_like(X).astype(bool)
+    if Y_mask is None:
+        Y_mask = np.ones_like(Y).astype(bool)
     
-    # fix variances to be the same at all pixels!
-    K1C = kernel1 + C_pix
-    log_K1C_det = np.linalg.slogdet(K1C)[1]
-    K1C_inv = np.linalg.inv(K1C)
+#    # fix variances to be the same at all pixels!
+#    K1C = kernel1 + C_pix
+#    factor1 = cho_factor(K1C, overwrite_a = True)
+#    log_K1C_det = 2. * np.sum(np.log(np.diag(factor1[0])))
     
-    Lx, Ly, gradLx, gradLy = 0., 0., 0., 0.
+    Lx, Ly = 0., 0.
+    gradLx = np.zeros_like(Z)
+    gradLy = np.zeros_like(Z)
     for d in range(D):
-        # K1C = kernel1 + np.diag(X_var[:, d])
-        Lx += LxOrLy(log_K1C_det, K1C_inv, X[:, d])   
-        gradLx += dLdZ(X[:, d], Z, K1C_inv, kernel1, theta_band)        
+        good_stars = X_mask[:, d]
+#        if np.sum(good_stars) == N:
+#            thislogdet = log_K1C_det
+#            thisfactor = factor1
+#            thiskernel = kernel1
+#        else:
+        thiskernel = kernel1[good_stars, :][:, good_stars]
+        #K1C = thiskernel + C_pix[good_stars, :][:, good_stars]
+        K1C = thiskernel + np.diag(X_var[good_stars, d])
+        thisfactor = cho_factor(K1C, overwrite_a = True)
+        thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+        Lx += LxOrLy(thislogdet, thisfactor, X[good_stars, d])   
+        gradLx[good_stars, :] += dLdZ(X[good_stars, d], Z[good_stars, :], thisfactor, thiskernel, theta_band)        
         
     for l in range(L):
-        good_stars = good_labels[:, l]
-        #K2C = kernel2[good_stars, good_stars] + np.diag(Y_var[good_stars, l])
-        K2C = kernel2 + np.diag(Y_var[:, l])
-        log_K2C_det = np.linalg.slogdet(K2C)[1]
-        K2C_inv = np.linalg.inv(K2C)
-        Ly += LxOrLy(log_K2C_det, K2C_inv, Y[:, l]) 
-        gradLy += dLdZ(Y[:, l], Z, K2C_inv, kernel2, gamma_band, good_stars)    
-        
-    Lz = -0.5 * np.log(2.*np.pi) - 0.5 * np.sum(Z**2)
+        good_stars = Y_mask[:, l]
+        thiskernel = kernel2[good_stars, :][:, good_stars]
+        K2C = thiskernel + np.diag(Y_var[good_stars, l])
+        factor2 = cho_factor(K2C, overwrite_a = True)
+        log_K2C_det = 2. * np.sum(np.log(np.diag(factor2[0])))
+        Ly += LxOrLy(log_K2C_det, factor2, Y[good_stars, l]) 
+        gradLy[good_stars, :] += dLdZ(Y[good_stars, l], Z[good_stars, :], factor2, thiskernel, gamma_band)    
+
+    Lz = -0.5 * np.sum(Z**2)
     dlnpdZ = -Z 
     L = Lx + Ly + Lz   
     gradL = gradLx + gradLy + dlnpdZ      
@@ -94,11 +110,71 @@ def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, good_labels 
     return -2.*L, -2.*gradL
 
 
-def LxOrLy(log_K_det, K_inv, data):  
-    L_term1 = -0.5 * data.shape[0] * np.log(2.*np.pi)    # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!
-    L_term2 = -0.5 * log_K_det                           # * data.shape[1], if more than one dimension! now: implemented as sum in lnL_Z!    
-    L_term3 = -0.5 * np.matrix.trace(np.dot(K_inv, np.dot(data, data.T)))
-    return L_term1 + L_term2 + L_term3
+def LxOrLy(log_K_det, factor, data):  
+    return -0.5 * log_K_det - 0.5 * np.dot(data, cho_solve(factor, data))
+
+
+def UpdateFactor(factor, index, Z, theta_rbf, theta_band, K, X_var_d):
+    
+    # make sure we use upper matrix
+    assert factor[1] == False
+
+#    Z_new = np.array(Z)    
+#    Z_new[index, :] = pars
+    K_new = kernelRBF(Z, theta_rbf, theta_band)
+    K_new[np.diag_indices_from(K_new)] += X_var_d
+    u = K_new[index, :] - K[index, :]
+    u[index] = 1.
+    cholupdate(factor[0], u.copy())
+    u[index] = 0.     
+    choldowndate(factor[0], u)
+    w = np.zeros_like(u)
+    w[index] = 1.
+    choldowndate(factor[0], w)
+    
+    return factor, K_new
+
+
+def lnL_Z_one(pars, X, Y, X_var, Y_var, hyper_params, Z, all_factors, index_n): 
+
+    theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params    
+    K1_orig = kernelRBF(Z, theta_rbf, theta_band)
+    K1 = np.array(K1_orig)
+    
+    Z[index_n, :] = pars
+    #K2 = kernelRBF(Z, gamma_rbf, gamma_band) 
+    
+    D = X.shape[0]
+    L = Y.shape[0]
+    
+    Lx, Ly = 0., 0.
+    gradLx = np.zeros_like(Z)
+    #gradLy = np.zeros_like(Z)
+    for d in range(D):
+        thisfactor, K1 = UpdateFactor(all_factors[d][0], index_n, Z, theta_rbf, theta_band, K1, X_var[:, d])
+        thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+        Lx += LxOrLy(thislogdet, thisfactor, X[:, d])
+        gradLx += dLdZone(index_n, X, Z, thisfactor, K1_orig, theta_band)
+        
+#    for l in range(L):
+#        thiskernel = K2[good_stars, :][:, good_stars]
+#        K2C = thiskernel + np.diag(Y_var[good_stars, l])
+#        #K2C = kernel2 + np.diag(Y_var[:, l])
+#        factor2 = cho_factor(K2C, overwrite_a = True)
+#        log_K2C_det = 2. * np.sum(np.log(np.diag(factor2[0])))
+#        #K2C_inv = np.linalg.inv(K2C)
+#        Ly += LxOrLy(log_K2C_det, factor2, Y[good_stars, l]) 
+#        gradLy[good_stars, :] += dLdZ(Y[good_stars, l], Z[good_stars, :], factor2, thiskernel, gamma_band)    
+
+
+    Lz = -0.5 * np.sum(pars**2)
+    dlnpdZ = -pars
+    L = Lx + Lz   
+    gradL = gradLx + dlnpdZ      
+
+    print(-2.*Lx, -2.*Ly, -2.*Lz)
+    
+    return -2.*L, -2.*gradL
 
 # -------------------------------------------------------------------------------
 # derivatives 
@@ -138,8 +214,11 @@ def dLdZ_old(data, Z, K_inv, K, band, good_stars = False):
     #print gradL.shape
     return gradL
 
-def dLdZ(data, Z, K_inv, K, band, good_stars = False):       
-    grad_dLdK = dLdK(K_inv, data)
+
+def dLdZ_newer(data, Z, factor, K, band, good_stars = False): 
+    #grad_dLdK = np.zeros_like(K)     
+    #grad_dLdK[good_stars, :][:, good_stars] = dLdK(K_inv, data)
+    grad_dLdK = dLdK(factor, data)
     gradL = np.zeros_like(Z)
     N, Q = Z.shape
     prefactor = grad_dLdK * band * K
@@ -150,12 +229,124 @@ def dLdZ(data, Z, K_inv, K, band, good_stars = False):
     return gradL
 
 
+def dLdZ(data, Z, factor, K, band): 
+    
+    K_inv_data = cho_solve(factor, data)
+    prefactor = band * K
+
+    gradL = np.zeros_like(Z)
+    N, Q = Z.shape # N might not be the same as global N, if labels have been dropped
+    for n in range(N):
+        #print l, Z.shape, (Z[good_stars, :] - Z[l, :]).shape, prefactor.shape
+        lhat = np.zeros((N))
+        lhat[n] = 1.
+        vec = prefactor[:, n, None] * (Z - Z[n, :])
+        gradL[n, :] += K_inv_data[n] * np.dot(K_inv_data, vec) - np.dot(cho_solve(factor, lhat), vec)
+    
+    return gradL
+
+
+def dLdZone(index, data, Z, factor, K, band):
+    
+    K_inv_data = cho_solve(factor, data)
+    prefactor = band * K[:, index]
+    N, Q = Z.shape 
+    lhat = np.zeros((N))
+    lhat[index] = 1.
+    vec = prefactor[:, None] * (Z - Z[index, :])
+    gradL = K_inv_data[index] * np.dot(K_inv_data, vec) - np.dot(cho_solve(factor, lhat), vec)
+    
+    return gradL
+
+# -------------------------------------------------------------------------------
+# testing derivatives
+# -------------------------------------------------------------------------------
+
+def test_dLdZone(index, data, Z_in, rbf, band, C_pix, eps):
+    
+    Z = np.array(Z_in)
+    K = kernelRBF(Z, rbf, band) + C_pix
+    factor = cho_factor(K)
+    dL = dLdZone(index, data, Z, factor, K, band)
+    
+    for q in range(Z.shape[1]):
+        Z[index, q] += eps
+        K = kernelRBF(Z, rbf, band) + C_pix
+        factor = cho_factor(K)
+        log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+        Lplus = LxOrLy(log_K_det, factor, data)
+        
+        Z[index, q] -= 2. * eps
+        K = kernelRBF(Z, rbf, band) + C_pix
+        factor = cho_factor(K)
+        log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+        Lminus = LxOrLy(log_K_det, factor, data)
+        
+        Z[index, q] += eps             
+        xx = (Lplus - Lminus)/(2. * eps)             
+        print dL[q], xx, (dL[q] - xx)/(dL[q] + xx)            
+    return
+
+
+
+
+def test_dLdK(K_in, data, eps):
+    
+    K = np.array(K_in)
+    K_inv = np.linalg.inv(K)
+    dL = dLdK(K_inv, data)
+    
+    for n in range(K.shape[0]):
+        for m in range(K.shape[1]):
+            K[n, m] += eps
+            factor = cho_factor(K)
+            log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+            Lplus = LxOrLy(log_K_det, factor, data)
+            
+            K[n, m] -= 2. * eps
+            factor = cho_factor(K)
+            log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+            Lminus = LxOrLy(log_K_det, factor, data)
+            
+            K[n, m] += eps
+             
+            print dL[n, m], (Lplus - Lminus)/(2. * eps)            
+    return
+
+
+
+def test_dLdZ(Z_in, data, rbf, band, C_pix, eps):
+    
+    Z = np.array(Z_in)
+    K = kernelRBF(Z, rbf, band) + C_pix
+    factor = cho_factor(K)
+    dL = dLdZ(data, Z, factor, K, band, good_stars = False)
+    
+    for l in range(Z.shape[0]):
+        for q in range(Z.shape[1]):
+            Z[l, q] += eps
+            K = kernelRBF(Z, rbf, band) + C_pix
+            factor = cho_factor(K)
+            log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+            Lplus = LxOrLy(log_K_det, factor, data)
+            
+            Z[l, q] -= 2. * eps
+            K = kernelRBF(Z, rbf, band) + C_pix
+            factor = cho_factor(K)
+            log_K_det = 2. * np.sum(np.log(np.diag(factor[0])))
+            Lminus = LxOrLy(log_K_det, factor, data)
+            
+            Z[l, q] += eps             
+            xx = (Lplus - Lminus)/(2. * eps)             
+            print dL[l, q], xx, (dL[l, q] - xx)/(dL[l, q] + xx)            
+    return
+
 # -------------------------------------------------------------------------------
 # optimization of hyper parameters
 # -------------------------------------------------------------------------------
 
 
-def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var):
+def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, C_pix):
     
     # hyper parameters shouldn't be negative
     if all(i >= 0 for i in pars):    
@@ -169,34 +360,40 @@ def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var):
         kernel1 = kernelRBF(Z, theta_rbf, theta_band)
         kernel2 = kernelRBF(Z, gamma_rbf, gamma_band)
         
+        K1C = kernel1 + C_pix
+        log_K1C_det = np.linalg.slogdet(K1C)[1]
+        K1C_inv = np.linalg.inv(K1C)
+        
         Lx, Ly, gradLx, gradLy = 0., 0., 0., 0.
         for d in range(D):
-            K1C = kernel1 + np.diag(X_var[:, d])
-            Lx += LxOrLy(K1C, X[:, d])   
-            gradLx += dLdhyper(X[:, d], Z, theta_band, theta_rbf, kernel1, K1C) 
+            #K1C = kernel1 + np.diag(X_var[:, d])
+            Lx += LxOrLy(log_K1C_det, K1C_inv, X[:, d])   
+            gradLx += dLdhyper(X[:, d], Z, theta_band, theta_rbf, kernel1, K1C_inv) 
             
         for l in range(L):
             K2C = kernel2 + np.diag(Y_var[:, l])
-            Ly += LxOrLy(K2C, Y[:, l]) 
-            gradLy += dLdhyper(Y[:, l], Z, gamma_band, gamma_rbf, kernel2, K2C) 
+            log_K2C_det = np.linalg.slogdet(K2C)[1]
+            K2C_inv = np.linalg.inv(K2C)
+            Ly += LxOrLy(log_K2C_det, K2C_inv, Y[:, l]) 
+            gradLy += dLdhyper(Y[:, l], Z, gamma_band, gamma_rbf, kernel2, K2C_inv) 
          
         Lz = -0.5 * np.log(2.*np.pi) - 0.5 * np.sum(Z**2)                      
         L = Lx + Ly + Lz
         gradL = np.hstack((gradLx, gradLy))
         
-        print(-2.*Lx, -2.*Ly) 
+        print(-2.*Lx, -2.*Ly, -2.*Lz) 
         return -2.*L, -2.*gradL
     else:
         print('hyper parameters negative!') 
         return 1e12, 1e12 * np.ones_like(pars) # hack! check again!
 
 
-def dLdhyper(data, Z, band, rbf, K, KC):  
+def dLdhyper(data, Z, band, rbf, K, KC_inv):  
     dKdrbf = 1./rbf * K    
     dKdband = K * B_matrix(Z)
     
-    dLdrbf = np.sum(dLdK(KC, data) * dKdrbf)        
-    dLdband = np.sum(dLdK(KC, data) * dKdband)    
+    dLdrbf = np.sum(dLdK(KC_inv, data) * dKdrbf)        
+    dLdband = np.sum(dLdK(KC_inv, data) * dKdband)    
     
     return np.array([dLdrbf, dLdband])
 
@@ -240,8 +437,8 @@ def lnL_znew(pars, X_new_j, X_new_var_j, Z, data, data_var, K, rbf, band):
     gradL = 0.
     for d in range(D):
         mean, var, k_Z_zj, inv_K = mean_var(Z, Zj, data[:, d], data_var[:, d], K, rbf, band)
-        #assert var > 0.
-
+        assert var > 0.
+        
         L += -0.5 * np.dot((X_new_j[d] - mean).T, (X_new_j[d] - mean)) / \
                           (var + X_new_var_j[d]) - 0.5 * np.log(var + X_new_var_j[d]) 
 
@@ -270,32 +467,25 @@ def dmusigma2dZ(data, inv_K, Z, Zj, k_Z_zj, band):
     return dmudZ, dsigma2dZ
 
 
-def predictX(N_new, X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params):
+def predictX(X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params, y0, z0):
     
-    Q = Z_final.shape[1]
-    L = Y.shape[1]
+    N, Q = Z_final.shape
+    N, L = Y.shape
     theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params
     K1 = kernelRBF(Z_final, theta_rbf, theta_band)
     K2 = kernelRBF(Z_final, gamma_rbf, gamma_band)
-    Z_new = np.zeros((N_new, Q))
-    Y_new = np.zeros((N_new, L))
-    # first guess: 
-    z0 = np.mean(Z_final, axis = 0)
-    y0 = np.mean(Y, axis = 0)
-    #z0, y0 = FindNeighbour(Z_final, X_new, X, X_new_var, X_var, Y)
+
+    res = op.minimize(lnL_znew, x0 = z0, args = (X_new, X_new_var, Z_final, X, X_var, K1, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
+                   options={'gtol':1e-12, 'ftol':1e-12})   
+    Z_new = res.x
+    success_z = res.success
+    print('latent variable optimization - success: {}'.format(res.success))
     
-    for j in range(N_new):
-        res = op.minimize(lnL_znew, x0 = z0, args = (X_new[j, :], X_new_var[j, :], Z_final, X, X_var, K1, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
-                       options={'gtol':1e-12, 'ftol':1e-12})   
-        Z_new[j, :] = res.x
-        success_z = res.success
-        print('latent variable optimization - success: {}'.format(res.success))
-        
-        res = op.minimize(lnL_ynew, x0 = y0, args = (Z_new[j, :], Z_final, Y, Y_var, K2, gamma_rbf, gamma_band), method = 'L-BFGS-B', jac = True, 
-                       options={'gtol':1e-12, 'ftol':1e-12})   
-        Y_new[j, :] = res.x
-        success_y = res.success
-        print('new labels optimization - success: {}'.format(res.success))        
+    res = op.minimize(lnL_ynew, x0 = y0, args = (Z_new, Z_final, Y, Y_var, K2, gamma_rbf, gamma_band), method = 'L-BFGS-B', jac = True, 
+                   options={'gtol':1e-12, 'ftol':1e-12})   
+    Y_new = res.x
+    success_y = res.success
+    print('new labels optimization - success: {}'.format(res.success))        
     
     return Z_new, Y_new, success_z, success_y
 
@@ -316,17 +506,6 @@ def lnL_ynew(pars, Zj, Z, data, data_var, K, rbf, band):
         gradL.append( -(lj[l] - mean)/var )
     
     return -2.*like, -2.*np.array(gradL)
-
-
-def FindNeighbour(Z_final, X_new, X, X_new_var, X_var, Y):
-    
-    # minimize chi^2 here!    
-    closest_n = min(X, key=lambda x:abs(x - X_new))
-    index = Y.index(closest_n)
-    z0 = Z_final[index]
-    y0 = Y[index]
-    
-    return z0, y0
 
 # -------------------------------------------------------------------------------
 # data
@@ -367,3 +546,29 @@ def PCAInitial(X, Q):
     # take mean as first component, i.e. 1 as first guess for each star!
     #Z_initial_complete = np.hstack((np.ones((N, 1)), Z_initial))
     return Z_initial
+
+# -------------------------------------------------------------------------------
+# xxx
+# -------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
