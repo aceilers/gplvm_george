@@ -14,12 +14,12 @@ from astropy.io import fits
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 import pickle
+import matplotlib.pyplot as plt
+from astropy.io import fits
 
 # -------------------------------------------------------------------------------
 # download data
 # -------------------------------------------------------------------------------
-
-parallaxes_tgas = True
 
 delete0 = 'find ./data/ -size 0c -delete'
 substr = 'l31c'
@@ -38,59 +38,46 @@ apogee_data = apogee_table[1].data
 apogee_data = apogee_data[apogee_data['DEC'] > -90.0]
 
 # download TGAS data   
-if parallaxes_tgas: 
-    fn = 'stacked_tgas.fits'
-    url = 'http://s3.adrian.pw/' + fn
-    destination = './data/'+ fn
-    cmd = 'wget ' + url + ' -O ' + destination
-    if not os.path.isfile(destination):
-        subprocess.call(cmd, shell = True)
-        subprocess.call(delete0, shell = True)
-    print("opening " + destination)
-    tgas_table = fits.open(destination)
-    tgas_data = tgas_table[1].data
-
-else:
-    # parallaxes Hipparcos (from Diane)
-    data_hip = Table.read('./data/APOGEE_plx_all_20.txt', format='ascii', data_start = 0)
-    data_hip.rename_column('col1', 'APOGEE_ID')
-    data_hip.rename_column('col2', 'parallax')                      
-    data_hip.rename_column('col3', 'parallax_error')    
-    data_hip.rename_column('col4', 't/h')   
-    data_hip['parallax_error'] = data_hip['parallax_error'] * data_hip['parallax']
-
-# -------------------------------------------------------------------------------
-# match Hipparcos data to APOGEE labels
-# -------------------------------------------------------------------------------
-    apogee_data = Table(apogee_data)
-    apogee_data = join(data_hip, apogee_data, keys = 'APOGEE_ID')
-               
-# -------------------------------------------------------------------------------
-# cut in logg <= 2:
-# -------------------------------------------------------------------------------
-
-#apogee_data = apogee_data[np.logical_and(apogee_data['LOGG'] <= 2.2, apogee_data['LOGG'] >= 0)]
-                          
+fn = 'stacked_tgas.fits'
+url = 'http://s3.adrian.pw/' + fn
+destination = './data/'+ fn
+cmd = 'wget ' + url + ' -O ' + destination
+if not os.path.isfile(destination):
+    subprocess.call(cmd, shell = True)
+    subprocess.call(delete0, shell = True)
+print("opening " + destination)
+tgas_table = fits.open(destination)
+tgas_data = tgas_table[1].data
+                         
 # -------------------------------------------------------------------------------
 # match TGAS and APOGEE
 # -------------------------------------------------------------------------------
-if parallaxes_tgas: 
-    apogee_cat = SkyCoord(ra=apogee_data['RA']*u.degree, dec=apogee_data['DEC']*u.degree)
-    tgas_cat = SkyCoord(ra=tgas_data['RA']*u.degree, dec=tgas_data['DEC']*u.degree)
-    
-    id_tgas, id_apogee, d2d, d3d = apogee_cat.search_around_sky(tgas_cat, 0.001*u.degree)
-    
-    tgas_data = tgas_data[id_tgas]
-    apogee_data = apogee_data[id_apogee]    
-    print('matched entries: {}'.format(len(tgas_data)))
+apogee_cat = SkyCoord(ra=apogee_data['RA']*u.degree, dec=apogee_data['DEC']*u.degree)
+tgas_cat = SkyCoord(ra=tgas_data['RA']*u.degree, dec=tgas_data['DEC']*u.degree)
 
+id_tgas, id_apogee, d2d, d3d = apogee_cat.search_around_sky(tgas_cat, 0.001*u.degree)
+
+tgas_data = tgas_data[id_tgas]
+apogee_data = apogee_data[id_apogee]    
+print('matched entries: {}'.format(len(tgas_data)))
+
+# -------------------------------------------------------------------------------
+# hack! Cut down to only high quality data!
+# -------------------------------------------------------------------------------
+
+cut = tgas_data['parallax']/tgas_data['parallax_error'] > 10.
+tgas_data = tgas_data[cut]              
+apogee_data = apogee_data[cut] 
+             
 # -------------------------------------------------------------------------------
 # get APOGEE spectra
 # -------------------------------------------------------------------------------
-delete0 = 'find ./data/spectra/ -size 0c -delete'
+'''delete0 = 'find ./data/spectra/ -size 0c -delete'
 subprocess.call(delete0, shell = True)
 
 for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCATION_ID'], apogee_data['FIELD'])):
+    
+    print('Looking for object {}'.format(apogee_data['FILE']))
     
     fn = fn2.replace('apStar-r8', 'aspcapStar-r8-l31c.2')
     destination2 = './data/spectra/' + fn2.strip()
@@ -103,7 +90,7 @@ for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCA
             try:
                 url4 = 'https://data.sdss.org/sas/dr14/apogee/spectro/redux/r8/stars/apo1m/' + field.strip() + '/' + fn2.strip()
                 cmd = 'wget ' + url4 + ' -O ' + destination2
-                print cmd
+                #print cmd
                 subprocess.call(cmd, shell = True)
                 subprocess.call(delete0, shell = True)
             except:
@@ -115,20 +102,20 @@ for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCA
             url2 = urlbase + fn2.strip()
             try:
                 cmd = 'wget ' + url + ' -O ' + destination
-                print cmd
+                #print cmd
                 subprocess.call(cmd, shell = True)
                 subprocess.call(delete0, shell = True)
             except:
                 try:
                     cmd = 'wget ' + url2 + ' -O ' + destination2
-                    print cmd
+                    #print cmd
                     subprocess.call(cmd, shell = True)
                     subprocess.call(delete0, shell = True)
                 except:
                     try:
                         url3 = 'https://data.sdss.org/sas/dr14/apogee/spectro/redux/r8/stars/apo25m/'  + str(loc).strip() + '/' + fn2
                         cmd = 'wget ' + url3 + ' -O ' + destination2
-                        print cmd
+                        #print cmd
                         subprocess.call(cmd, shell = True)
                         subprocess.call(delete0, shell = True)
                     except:
@@ -153,8 +140,7 @@ for i in range(len(apogee_data['FILE'])):
             print(i, apogee_data['FILE'][i], apogee_data['FIELD'][i], apogee_data['LOCATION_ID'][i])
             found[i] = False
 
-if parallaxes_tgas:
-    tgas_data = tgas_data[found]                     
+tgas_data = tgas_data[found]                     
 apogee_data = apogee_data[found]    
 
 print('spectra found for: {}'.format(len(apogee_data)))
@@ -210,10 +196,11 @@ def NormalizeData(dataall):
     
     pixlist = np.loadtxt('data/pixtest8_dr13.txt', usecols = (0,), unpack = 1)
     pixlist = map(int, pixlist)
-    LARGE  = 1.                                                          # magic LARGE sigma value
+    LARGE  = 3.0                          # magic LARGE sigma value
    
     continuum = np.zeros((Nlambda, Nstar))
     dataall_flat = np.ones((Nlambda, Nstar, 3))
+    dataall_flat[:, :, 2] = LARGE
     for jj in range(Nstar):
         bad_a = np.logical_or(np.isnan(dataall[:, jj, 1]), np.isinf(dataall[:,jj, 1]))
         bad_b = np.logical_or(dataall[:, jj, 2] <= 0., np.isnan(dataall[:, jj, 2]))
@@ -222,10 +209,6 @@ def NormalizeData(dataall):
         dataall[bad, jj, 2] = LARGE
         var_array = LARGE**2 + np.zeros(len(dataall)) 
         var_array[pixlist] = 0.000
-        
-        #bad = dataall_flat[bad, jj, 2] > LARGE
-        dataall_flat[bad, jj, 1] = 1.
-        dataall_flat[bad, jj, 2] = LARGE
         
         take1 = np.logical_and(dataall[:,jj,0] > 15150, dataall[:,jj,0] < 15800)
         take2 = np.logical_and(dataall[:,jj,0] > 15890, dataall[:,jj,0] < 16430)
@@ -245,6 +228,10 @@ def NormalizeData(dataall):
         dataall_flat[take2, jj, 2] = dataall[take2,jj,2]/fit2(dataall[take2, 0, 0]) 
         dataall_flat[take3, jj, 2] = dataall[take3,jj,2]/fit3(dataall[take3, 0, 0]) 
         
+        bad = dataall_flat[:, jj, 2] > 0.3 # MAGIC
+        dataall_flat[bad, jj, 1] = 1.
+        dataall_flat[bad, jj, 2] = LARGE
+        
     for jj in range(Nstar):
         print "continuum_normalize_tcsh working on star", jj
         bad_a = np.logical_not(np.isfinite(dataall_flat[:, jj, 1]))
@@ -262,10 +249,9 @@ def NormalizeData(dataall):
 # -------------------------------------------------------------------------------
 # normalize spectra
 # -------------------------------------------------------------------------------
-if parallaxes_tgas: 
-    file_name = 'apogee_spectra_norm_nocuts.pickle'
-else:
-    file_name = 'apogee_spectra_norm_hip.pickle'
+
+file_name = 'apogee_spectra_norm_nocuts.pickle'
+
 destination = './data/' + file_name
 if not os.path.isfile(destination):
     data_norm, continuum = LoadAndNormalizeData(apogee_data['FILE'], file_name, destination = './data/spectra/')
@@ -273,17 +259,45 @@ if not os.path.isfile(destination):
 # -------------------------------------------------------------------------------
 # save files!
 # -------------------------------------------------------------------------------
-if parallaxes_tgas:
-    apogee_data = Table(apogee_data)
-    tgas_data = Table(tgas_data)
-    training_labels = hstack([apogee_data, tgas_data])
-    
-    f = open('data/training_labels_apogee_tgas_nocuts.pickle', 'w')
-    pickle.dump(training_labels, f)
-    f.close()
-else:
-    f = open('data/training_labels_apogee_hip.pickle', 'w')
-    pickle.dump(apogee_data, f)
-    f.close()    
+apogee_data = Table(apogee_data)
+tgas_data = Table(tgas_data)
+training_labels = hstack([apogee_data, tgas_data])
+
+f = open('data/training_labels_apogee_tgas_nocuts.pickle', 'w')
+pickle.dump(training_labels, f)
+f.close()  
 
 # -------------------------------------------------------------------------------'''
+
+# add extinction from Lauren Anderson's paper!
+hdulist = fits.open('data/photoParallaxAnderson17.fits')
+xx = hdulist[1].data
+
+# match in RA and DEC
+lauren_cat = SkyCoord(ra=xx['ra']*u.degree, dec=xx['dec']*u.degree)
+tgas_cat = SkyCoord(ra=tgas_data['RA']*u.degree, dec=tgas_data['DEC']*u.degree)
+id_tgas, id_lauren, d2d, d3d = lauren_cat.search_around_sky(tgas_cat, 0.001*u.degree)
+
+tgas_data = tgas_data[id_tgas]
+xx = xx[id_lauren]
+apogee_data = apogee_data[id_tgas]  
+print('matched entries: {}'.format(len(tgas_data)))
+
+extinction = xx['dust E(B-V)']
+            
+Q = 10**(0.2*apogee_data['K']) * tgas_data['parallax']/100.                    # assumes parallaxes is in mas
+Q_err = tgas_data['parallax_error'] * 10**(0.2*apogee_data['K'])/100. 
+
+plt.scatter(apogee_data['TEFF'], apogee_data['LOGG'], c = apogee_data['FE_H'], vmin = -2., vmax = .5)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$\log g$')
+plt.ylim(4, 0)
+plt.colorbar()
+
+plt.scatter(apogee_data['TEFF'], Q, c = apogee_data['FE_H'], vmin = -2., vmax = .5)
+plt.xlim(5700, 3700)
+plt.ylim(-0.1, 5)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$Q$')
+plt.colorbar()

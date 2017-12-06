@@ -18,7 +18,7 @@ from astropy.table import Column, Table, join
 import sys
 import schwimmbad 
 
-from functions_gplvm import lnL_Z, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial, DownloadSpectra
+from functions_gplvm import lnL_Z_old, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial, DownloadSpectra
 from NN import Chi2_Matrix, NN
 
 # -------------------------------------------------------------------------------
@@ -283,7 +283,7 @@ print('initial latent variables: %s' %Z)
 
 pool = schwimmbad.SerialPool()
 
-cygnet_likelihood = CygnetLikelihood(X, Y, Q, hyper_params, X_var, Y_var, X_mask, Y_mask)
+#cygnet_likelihood = CygnetLikelihood(X, Y, Q, hyper_params, X_var, Y_var, X_mask, Y_mask)
 
 t1 = time.time()
 
@@ -303,10 +303,10 @@ for t in range(max_iter):
     
     # optimize Z
     print("optimizing latent parameters")
-#    res = op.minimize(lnL_Z_old, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask, Y_mask), method = 'L-BFGS-B', jac = True, 
-#                      options={'gtol':1e-12, 'ftol':1e-12})
-    res = op.minimize(cygnet_likelihood, x0 = Z, args=(pool,), method = 'L-BFGS-B', jac = True, 
+    res = op.minimize(lnL_Z_old, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask, Y_mask), method = 'L-BFGS-B', jac = True, 
                       options={'gtol':1e-12, 'ftol':1e-12})
+#    res = op.minimize(cygnet_likelihood, x0 = Z, args=(pool,), method = 'L-BFGS-B', jac = True, 
+#                      options={'gtol':1e-12, 'ftol':1e-12})
              
     # update Z
     Z = res.x
@@ -314,7 +314,7 @@ for t in range(max_iter):
     print('success: {}'.format(res.success))
     # print('new Z: {}'.format(res.x))
 
-sys.exit(0)
+#sys.exit(0)
 
 t2 = time.time()
 print('optimization in {} s.'.format(t2-t1))
