@@ -16,7 +16,12 @@ from sklearn.decomposition import PCA
 from itertools import product
 from scipy.linalg import cho_solve, cho_factor
 from choldate import cholupdate, choldowndate
+import os.path
+import subprocess
+from astropy.io import fits
 
+
+nervous = False
 
 # -------------------------------------------------------------------------------
 # kernel
@@ -53,7 +58,148 @@ def B_matrix_new(Z):
 # optimization of latent variables
 # -------------------------------------------------------------------------------
 
-def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, X_mask = None, Y_mask = None):  
+def cygnet_likelihood_d_worker(task):
+    obj, d = task
+    good_stars = obj.X_mask[:, d]
+    thiskernel = obj.kernel1[good_stars, :][:, good_stars]
+    K1C = thiskernel + np.diag(obj.X_var[good_stars, d])
+    thisfactor = cho_factor(K1C, overwrite_a = True)
+    thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+    Lx = LxOrLy(thislogdet, thisfactor, obj.X[good_stars, d])
+    gradLx = np.zeros_like(obj.Z)
+    gradLx[good_stars, :] = dLdZ(obj.X[good_stars, d], obj.Z[good_stars, :], thisfactor, thiskernel, obj.theta_band)        
+    return Lx, gradLx
+
+def cygnet_likelihood_l_worker(task):
+    obj, l = task
+    
+    good_stars = obj.Y_mask[:, l]
+    thiskernel = obj.kernel2[good_stars, :][:, good_stars]
+    K2C = thiskernel + np.diag(obj.Y_var[good_stars, l])
+    thisfactor = cho_factor(K2C, overwrite_a = True)
+    thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+    Ly = LxOrLy(thislogdet, thisfactor, obj.Y[good_stars, l])
+    gradLy = np.zeros_like(obj.Z)
+    gradLy[good_stars, :] = dLdZ(obj.X[good_stars, l], obj.Z[good_stars, :], thisfactor, thiskernel, obj.gamma_band)        
+    return Ly, gradLy
+
+class CygnetLikelihood():
+    
+    def __init__(self, X, Y, Q, hyper_params, X_var, Y_var, X_mask = None, Y_mask = None):
+        '''
+        X: pixel data
+        Y: label data
+        '''
+        # change X and Y!
+        self.X = X.copy()
+        self.Y = Y.copy()
+        self.X_var = X_var.copy()
+        self.Y_var = Y_var.copy()
+        assert self.X.shape == self.X_var.shape
+        assert self.Y.shape == self.Y_var.shape        
+        self.N, self.D = self.X.shape
+        N, self.L = self.Y.shape
+        assert N == self.N
+        self.Q = Q
+        self.theta_rbf, self.theta_band, self.gamma_rbf, self.gamma_band = hyper_params
+        if X_mask is None:
+            self.X_mask = np.ones_like(X).astype(bool)
+        else:
+            self.X_mask = X_mask.copy()
+        if Y_mask is None:
+            self.Y_mask = np.ones_like(Y).astype(bool)    
+        else:
+            self.Y_mask = Y_mask.copy()
+        
+        # container to hold the summed likelihood value, gradients
+        self._L = 0.
+        self._gradL = np.zeros_like(self.Z)
+        
+    def update_pars(self, pars):
+        
+        self.Z = np.reshape(pars, (self.N, self.Q))
+        self.kernel1 = kernelRBF(self.Z, self.theta_rbf, self.theta_band)
+        self.kernel2 = kernelRBF(self.Z, self.gamma_rbf, self.gamma_band)
+
+    def __call__(self, pars, pool):
+        self.update_pars(pars)        
+        
+        tasks = [(self, d) for d in range(self.D)]
+        Lx = 0.
+        gradLx = np.zeros_like(self.Z)
+        for result in pool.map(cygnet_likelihood_d_worker, tasks):
+            Lx += result[0]
+            gradLx += result[1]
+        
+        # reset containers
+        cygnet_likelihood._L = 0.    
+        cygnet_likelihood._gradL = np.zeros_like(cygnet_likelihood.Z)
+        for _ in pool.map(cygnet_likelihood, zip(range(L), ['l']*L)):
+            pass
+        Ly = cygnet_likelihood._L
+        gradLy = cygnet_likelihood._gradL
+        
+        Lz = -0.5 * np.sum(cygnet_likelihood.Z**2)
+        dlnpdZ = -cygnet_likelihood.Z 
+        L = Lx + Ly + Lz   
+        gradL = gradLx + gradLy + dlnpdZ      
+        gradL = np.reshape(gradL, (cygnet_likelihood.N * cygnet_likelihood.Q, ))   # reshape gradL back into 1D array   
+        print(-2.*Lx, -2.*Ly, -2.*Lz)
+        
+        return -2.*L, -2.*gradL
+        
+        
+        if l_or_d == 'd':
+            return self.lnLd(index)
+        elif l_or_d == 'l':
+            return self.lnLl(index)
+    
+    def lnLl(self, l):
+        good_stars = self.Y_mask[:, l]
+        thiskernel = self.kernel2[good_stars, :][:, good_stars]
+        K2C = thiskernel + np.diag(self.Y_var[good_stars, l])
+        thisfactor = cho_factor(K2C, overwrite_a = True)
+        thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+        Ly = LxOrLy(thislogdet, thisfactor, self.Y[good_stars, l])
+        gradLy = np.zeros_like(self.Z)
+        gradLy[good_stars, :] = dLdZ(self.X[good_stars, l], self.Z[good_stars, :], thisfactor, thiskernel, self.gamma_band)        
+        return Ly, gradLy
+    
+    def callback(self, result):
+        _L, _gradL = result
+        self._L += _L
+        self._gradL += _gradL
+
+def lnL_Z(pars, X, Y, Q, hyper_params, pool, X_var, Y_var, X_mask = None, Y_mask = None):  
+        
+    cygnet_likelihood = CygnetLikelihood(pars, X, Y, Q, hyper_params, X_var, Y_var, X_mask, Y_mask)
+    D = cygnet_likelihood.D    
+    L = cygnet_likelihood.L    
+    
+    for _ in pool.map(cygnet_likelihood, zip(range(D), ['d']*D)):
+        pass
+    Lx = cygnet_likelihood._L
+    gradLx = cygnet_likelihood._gradL
+    
+    # reset containers
+    cygnet_likelihood._L = 0.    
+    cygnet_likelihood._gradL = np.zeros_like(cygnet_likelihood.Z)
+    for _ in pool.map(cygnet_likelihood, zip(range(L), ['l']*L)):
+        pass
+    Ly = cygnet_likelihood._L
+    gradLy = cygnet_likelihood._gradL
+    
+    Lz = -0.5 * np.sum(cygnet_likelihood.Z**2)
+    dlnpdZ = -cygnet_likelihood.Z 
+    L = Lx + Ly + Lz   
+    gradL = gradLx + gradLy + dlnpdZ      
+    gradL = np.reshape(gradL, (cygnet_likelihood.N * cygnet_likelihood.Q, ))   # reshape gradL back into 1D array   
+    print(-2.*Lx, -2.*Ly, -2.*Lz)
+    
+    return -2.*L, -2.*gradL
+
+
+def lnL_Z_old(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask = None, Y_mask = None):  
     
     N = Z_initial.shape[0]
     Q = Z_initial.shape[1]
@@ -76,25 +222,28 @@ def lnL_Z(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, X_mask = Non
     Lx, Ly = 0., 0.
     gradLx = np.zeros_like(Z)
     gradLy = np.zeros_like(Z)
+        
     for d in range(D):
         good_stars = X_mask[:, d]
-#        if np.sum(good_stars) == N:
-#            thislogdet = log_K1C_det
-#            thisfactor = factor1
-#            thiskernel = kernel1
-#        else:
         thiskernel = kernel1[good_stars, :][:, good_stars]
-        #K1C = thiskernel + C_pix[good_stars, :][:, good_stars]
         K1C = thiskernel + np.diag(X_var[good_stars, d])
+#        if nervous:
+#            w = np.linalg.eigvalsh(K1C)
+#            assert np.all(w > 0)
+#            print w[0]/w[-1]
         thisfactor = cho_factor(K1C, overwrite_a = True)
         thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
         Lx += LxOrLy(thislogdet, thisfactor, X[good_stars, d])   
         gradLx[good_stars, :] += dLdZ(X[good_stars, d], Z[good_stars, :], thisfactor, thiskernel, theta_band)        
-        
+    
     for l in range(L):
         good_stars = Y_mask[:, l]
         thiskernel = kernel2[good_stars, :][:, good_stars]
         K2C = thiskernel + np.diag(Y_var[good_stars, l])
+        if nervous:
+            w = np.linalg.eigvalsh(K2C)
+            assert np.all(w > 0)
+            print w[0]/w[-1]
         factor2 = cho_factor(K2C, overwrite_a = True)
         log_K2C_det = 2. * np.sum(np.log(np.diag(factor2[0])))
         Ly += LxOrLy(log_K2C_det, factor2, Y[good_stars, l]) 
@@ -346,8 +495,8 @@ def test_dLdZ(Z_in, data, rbf, band, C_pix, eps):
 # -------------------------------------------------------------------------------
 
 
-def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, C_pix):
-    
+def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, X_mask = None, Y_mask = None):
+       
     # hyper parameters shouldn't be negative
     if all(i >= 0 for i in pars):    
         N = Z_initial.shape[0]
@@ -360,24 +509,33 @@ def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, C_pix):
         kernel1 = kernelRBF(Z, theta_rbf, theta_band)
         kernel2 = kernelRBF(Z, gamma_rbf, gamma_band)
         
-        K1C = kernel1 + C_pix
-        log_K1C_det = np.linalg.slogdet(K1C)[1]
-        K1C_inv = np.linalg.inv(K1C)
+        if X_mask is None:
+            X_mask = np.ones_like(X).astype(bool)
+        if Y_mask is None:
+            Y_mask = np.ones_like(Y).astype(bool)
         
-        Lx, Ly, gradLx, gradLy = 0., 0., 0., 0.
+        Lx, Ly = 0., 0.
+        gradLx = np.zeros((2,))
+        gradLy = np.zeros((2,))
         for d in range(D):
-            #K1C = kernel1 + np.diag(X_var[:, d])
-            Lx += LxOrLy(log_K1C_det, K1C_inv, X[:, d])   
-            gradLx += dLdhyper(X[:, d], Z, theta_band, theta_rbf, kernel1, K1C_inv) 
+            good_stars = X_mask[:, d]
+            thiskernel = kernel1[good_stars, :][:, good_stars]
+            K1C = thiskernel + np.diag(X_var[good_stars, d])
+            thisfactor = cho_factor(K1C, overwrite_a = True)
+            thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+            Lx += LxOrLy(thislogdet, thisfactor, X[good_stars, d])   
+            gradLx += dLdhyper(X[good_stars, d], Z[good_stars, :], theta_band, theta_rbf, thiskernel, thisfactor) 
             
         for l in range(L):
-            K2C = kernel2 + np.diag(Y_var[:, l])
-            log_K2C_det = np.linalg.slogdet(K2C)[1]
-            K2C_inv = np.linalg.inv(K2C)
-            Ly += LxOrLy(log_K2C_det, K2C_inv, Y[:, l]) 
-            gradLy += dLdhyper(Y[:, l], Z, gamma_band, gamma_rbf, kernel2, K2C_inv) 
+            good_stars = Y_mask[:, l]
+            thiskernel = kernel2[good_stars, :][:, good_stars]
+            K2C = thiskernel + np.diag(Y_var[good_stars, l])
+            thisfactor = cho_factor(K2C, overwrite_a = True)
+            thislogdet = 2. * np.sum(np.log(np.diag(thisfactor[0])))
+            Ly += LxOrLy(thislogdet, thisfactor, Y[good_stars, l]) 
+            gradLy += dLdhyper(Y[good_stars, l], Z[good_stars, :], gamma_band, gamma_rbf, thiskernel, thisfactor) 
          
-        Lz = -0.5 * np.log(2.*np.pi) - 0.5 * np.sum(Z**2)                      
+        Lz = - 0.5 * np.sum(Z**2)                      
         L = Lx + Ly + Lz
         gradL = np.hstack((gradLx, gradLy))
         
@@ -388,12 +546,16 @@ def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, C_pix):
         return 1e12, 1e12 * np.ones_like(pars) # hack! check again!
 
 
-def dLdhyper(data, Z, band, rbf, K, KC_inv):  
-    dKdrbf = 1./rbf * K    
-    dKdband = K * B_matrix(Z)
+def dLdhyper(data, Z, band, rbf, K, factor):  
     
-    dLdrbf = np.sum(dLdK(KC_inv, data) * dKdrbf)        
-    dLdband = np.sum(dLdK(KC_inv, data) * dKdband)    
+    K_inv_data = cho_solve(factor, data)
+
+    dKdrbf = 1./rbf * K  
+    B = B_matrix(Z)
+    dKdband = K * B
+    
+    dLdrbf = np.sum(dLdK(K_inv_data, data) * dKdrbf)        
+    dLdband = np.sum(dLdK(K_inv_data, data) * dKdband)    
     
     return np.array([dLdrbf, dLdband])
 
@@ -518,12 +680,12 @@ def make_label_input(labels, training_labels):
     for x in range(tr_label_input.shape[1]):
         bad = np.logical_or(tr_label_input[:, x] < -100., tr_label_input[:, x] > 9000.) # magic
         tr_label_input[bad, x] = np.median(tr_label_input[:, x])
-        #tr_ivar_input[bad, x] = 0.
+        #tr_ivar_input[bad, x] = 1.
         tr_var_input[bad, x] = 1e8
     # remove one outlier in T_eff and [N/Fe]!
     bad = tr_label_input[:, 0] > 5200.
     tr_label_input[bad, 0] = np.median(tr_label_input[:, 0])
-    #tr_ivar_input[bad, 0] = 0. 
+    #tr_ivar_input[bad, 0] = 1. 
     tr_var_input[bad, 0] = 1e8 
     #bad = tr_label_input[:, 5] < -0.6
     #tr_label_input[bad, 5] = np.median(tr_label_input[:, 5])
@@ -546,6 +708,171 @@ def PCAInitial(X, Q):
     # take mean as first component, i.e. 1 as first guess for each star!
     #Z_initial_complete = np.hstack((np.ones((N, 1)), Z_initial))
     return Z_initial
+
+# -------------------------------------------------------------------------------
+# download and normalize spectra
+# -------------------------------------------------------------------------------
+
+def DownloadSpectra(apogee_data):
+    
+    substr = 'l31c'
+    subsubstr = '2'
+    delete0 = 'find ./data/spectra/ -size 0c -delete'
+    subprocess.call(delete0, shell = True)
+    
+    for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCATION_ID'], apogee_data['FIELD'])):
+
+        fn = fn2.replace('apStar-r8', 'aspcapStar-r8-l31c.2')
+        destination2 = './data/spectra/' + fn2.strip()
+        destination = './data/spectra/' + fn.strip()
+        print(loc, destination, os.path.isfile(destination))
+        print(loc, destination2, os.path.isfile(destination2))
+        
+        if not (os.path.isfile(destination) or os.path.isfile(destination2)):
+            urlbase = 'https://data.sdss.org/sas/dr14/apogee/spectro/redux/r8/stars/' + substr \
+            + '/' + substr + '.' + subsubstr + '/' + str(loc).strip() + '/'
+            url = urlbase + fn.strip()
+            url2 = urlbase + fn2.strip()
+            try:
+                cmd = 'wget ' + url + ' -O ' + destination
+                print cmd
+                subprocess.call(cmd, shell = True)
+                subprocess.call(delete0, shell = True)
+            except:
+                try:
+                    cmd = 'wget ' + url2 + ' -O ' + destination2
+                    print cmd
+                    subprocess.call(cmd, shell = True)
+                    subprocess.call(delete0, shell = True)
+                except:
+                    print(fn + " " + fn2 + " not found in any location")       
+    
+    # remove missing files 
+    found = np.ones_like(np.arange(len(apogee_data)), dtype=bool)
+    destination = './data/spectra/'
+    for i in range(len(apogee_data['FILE'])):
+        entry = destination + (apogee_data['FILE'][i]).strip()
+        entry2 = entry.replace('apStar-r8', 'aspcapStar-r8-l31c.2').strip()
+        print(entry, entry2)
+        try:
+            hdulist = fits.open(entry)
+        except:
+            try:
+                hdulist = fits.open(entry2)
+            except:
+                print(entry + " " + entry2 + " not found or corrupted; deleting!")
+                cmd = 'rm -vf ' + entry + ' ' + entry2
+                subprocess.call(cmd, shell = True)
+                print(i, apogee_data['FILE'][i], apogee_data['FIELD'][i], apogee_data['LOCATION_ID'][i])
+                found[i] = False
+    
+    apogee_data = apogee_data[found]
+    print len(apogee_data)
+        
+    file_name = 'apogee_spectra_norm_cluster.pickle'
+    destination = './data/' + file_name
+    if not os.path.isfile(destination):
+        data_norm, continuum = LoadAndNormalizeData(apogee_data['FILE'], file_name, destination = './data/spectra/')
+
+    return found
+    
+    
+def LoadAndNormalizeData(file_spectra, file_name, destination):
+    
+    all_flux = np.zeros((len(file_spectra), 8575))
+    all_sigma = np.zeros((len(file_spectra), 8575))
+    all_wave = np.zeros((len(file_spectra), 8575))
+    
+    i=0
+    for entry in file_spectra:
+        print i
+        try:
+            hdulist = fits.open(destination + entry.strip())
+        except:
+            entry = entry.replace('apStar-r8', 'aspcapStar-r8-l31c.2')
+            hdulist = fits.open(destination + entry.strip())
+        if len(hdulist[1].data) < 8575: 
+            flux = hdulist[1].data[0]
+            sigma = hdulist[2].data[0]
+            print('something is weird...')
+        else:
+            flux = hdulist[1].data
+            sigma = hdulist[2].data
+        header = hdulist[1].header
+        start_wl = header['CRVAL1']
+        diff_wl = header['CDELT1']
+        val = diff_wl * (len(flux)) + start_wl
+        wl_full_log = np.arange(start_wl, val, diff_wl)
+        wl_full = [10**aval for aval in wl_full_log]
+        all_wave[i] = wl_full        
+        all_flux[i] = flux
+        all_sigma[i] = sigma
+        i += 1
+        
+    data = np.array([all_wave, all_flux, all_sigma])
+    data_norm, continuum = NormalizeData(data.T)
+    
+    f = open('data/' + file_name, 'w')
+    pickle.dump(data_norm, f)
+    f.close()
+    
+    return data_norm, continuum
+
+def NormalizeData(dataall):
+        
+    Nlambda, Nstar, foo = dataall.shape
+    
+    pixlist = np.loadtxt('data/pixtest8_dr13.txt', usecols = (0,), unpack = 1)
+    pixlist = map(int, pixlist)
+    LARGE  = 1.                                                          # magic LARGE sigma value
+   
+    continuum = np.zeros((Nlambda, Nstar))
+    dataall_flat = np.ones((Nlambda, Nstar, 3))
+    for jj in range(Nstar):
+        bad_a = np.logical_or(np.isnan(dataall[:, jj, 1]), np.isinf(dataall[:,jj, 1]))
+        bad_b = np.logical_or(dataall[:, jj, 2] <= 0., np.isnan(dataall[:, jj, 2]))
+        bad = np.logical_or(np.logical_or(bad_a, bad_b), np.isinf(dataall[:, jj, 2]))
+        dataall[bad, jj, 1] = 1.
+        dataall[bad, jj, 2] = LARGE
+        var_array = LARGE**2 + np.zeros(len(dataall)) 
+        var_array[pixlist] = 0.000
+        
+        bad = dataall_flat[bad, jj, 2] > LARGE
+        dataall_flat[bad, jj, 1] = 1.
+        dataall_flat[bad, jj, 2] = LARGE
+        
+        take1 = np.logical_and(dataall[:,jj,0] > 15150, dataall[:,jj,0] < 15800)
+        take2 = np.logical_and(dataall[:,jj,0] > 15890, dataall[:,jj,0] < 16430)
+        take3 = np.logical_and(dataall[:,jj,0] > 16490, dataall[:,jj,0] < 16950)
+        ivar = 1. / ((dataall[:, jj, 2] ** 2) + var_array) 
+        fit1 = np.polynomial.chebyshev.Chebyshev.fit(x=dataall[take1,jj,0], y=dataall[take1,jj,1], w=ivar[take1], deg=2) # 2 or 3 is good for all, 2 only a few points better in temp 
+        fit2 = np.polynomial.chebyshev.Chebyshev.fit(x=dataall[take2,jj,0], y=dataall[take2,jj,1], w=ivar[take2], deg=2)
+        fit3 = np.polynomial.chebyshev.Chebyshev.fit(x=dataall[take3,jj,0], y=dataall[take3,jj,1], w=ivar[take3], deg=2)
+        continuum[take1, jj] = fit1(dataall[take1, jj, 0])
+        continuum[take2, jj] = fit2(dataall[take2, jj, 0])
+        continuum[take3, jj] = fit3(dataall[take3, jj, 0])
+        dataall_flat[:, jj, 0] = 1.0 * dataall[:, jj, 0]
+        dataall_flat[take1, jj, 1] = dataall[take1,jj,1]/fit1(dataall[take1, 0, 0])
+        dataall_flat[take2, jj, 1] = dataall[take2,jj,1]/fit2(dataall[take2, 0, 0]) 
+        dataall_flat[take3, jj, 1] = dataall[take3,jj,1]/fit3(dataall[take3, 0, 0]) 
+        dataall_flat[take1, jj, 2] = dataall[take1,jj,2]/fit1(dataall[take1, 0, 0]) 
+        dataall_flat[take2, jj, 2] = dataall[take2,jj,2]/fit2(dataall[take2, 0, 0]) 
+        dataall_flat[take3, jj, 2] = dataall[take3,jj,2]/fit3(dataall[take3, 0, 0]) 
+        
+    for jj in range(Nstar):
+        print "continuum_normalize_tcsh working on star", jj
+        bad_a = np.logical_not(np.isfinite(dataall_flat[:, jj, 1]))
+        bad_a = np.logical_or(bad_a, dataall_flat[:, jj, 2] <= 0.)
+        bad_a = np.logical_or(bad_a, np.logical_not(np.isfinite(dataall_flat[:, jj, 2])))
+        bad_a = np.logical_or(bad_a, dataall_flat[:, jj, 2] > 1.)                    # magic 1.
+        # grow the mask
+        bad = np.logical_or(bad_a, np.insert(bad_a, 0, False, 0)[0:-1])
+        bad = np.logical_or(bad, np.insert(bad_a, len(bad_a), False)[1:])
+        dataall_flat[bad, jj, 1] = 1.
+        dataall_flat[bad, jj, 2] = LARGE
+            
+    return dataall_flat, continuum
+
 
 # -------------------------------------------------------------------------------
 # xxx

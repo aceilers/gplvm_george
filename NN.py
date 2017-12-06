@@ -9,7 +9,7 @@ Created on Thu Nov 30 11:04:16 2017
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle
-from astropy.table import Table
+from astropy.table import Table, Column
 import seaborn as sns
 
 from functions_gplvm import make_label_input
@@ -59,42 +59,86 @@ def NN(index, chi2, labels):
     return labels[np.argmin(chi2[:, index]), :], np.argmin(chi2[:, index])
 
 
-# -------------------------------------------------------------------------------
-# load spectra and labels (cluster stars)
+## -------------------------------------------------------------------------------
+## load spectra and labels (cluster stars)
+## -------------------------------------------------------------------------------
+#
+#table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
+#table['col3'].name = 'CLUSTER'
+#
+#f = open('data/train_labels_feh.pickle', 'r')    
+#training_labels = pickle.load(f)
+#f.close()
+#training_labels = Table(training_labels)
+#training_labels['col0'].name = 'TEFF'
+#training_labels['col1'].name = 'TEFF_ERR'
+#training_labels['col2'].name = 'LOGG'
+#training_labels['col3'].name = 'LOGG_ERR'
+#training_labels['col4'].name = 'FE_H'
+#training_labels['col5'].name = 'FE_H_ERR'
+#
+## mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
+#missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
+#training_labels = training_labels[~missing]
+#table = table[~missing]
+#
+#f = open('data/all_data_norm.pickle', 'r')    
+#spectra = pickle.load(f)
+#f.close()
+#spectra = spectra[:, ~missing, :]
+#wl = spectra[:, 0, 0]
+#fluxes = spectra[:, :, 1].T
+#ivars = (1./(spectra[:, :, 2]**2)).T  
+#        
+## exclude pleiades
+#pleiades = table['CLUSTER'] == 'Pleiades'
+#training_labels = training_labels[~pleiades]
+#fluxes = fluxes[~pleiades]
+#ivars = ivars[~pleiades]
+
+
+'''# -------------------------------------------------------------------------------
+# load spectra and labels 
 # -------------------------------------------------------------------------------
 
-table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
-table['col3'].name = 'CLUSTER'
-
-f = open('data/train_labels_feh.pickle', 'r')    
+# loading training labels
+#f = open('/Users/eilers/Dropbox/cygnet/data/training_labels_apogee_tgas.pickle', 'r')
+f = open('data/training_labels_apogee_tgas.pickle', 'r')
 training_labels = pickle.load(f)
 f.close()
-training_labels = Table(training_labels)
-training_labels['col0'].name = 'TEFF'
-training_labels['col1'].name = 'TEFF_ERR'
-training_labels['col2'].name = 'LOGG'
-training_labels['col3'].name = 'LOGG_ERR'
-training_labels['col4'].name = 'FE_H'
-training_labels['col5'].name = 'FE_H_ERR'
 
-# mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
-missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
-training_labels = training_labels[~missing]
-table = table[~missing]
-
-f = open('data/all_data_norm.pickle', 'r')    
+# loading normalized spectra
+#f = open('/Users/eilers/Dropbox/cygnet/data/apogee_spectra_norm.pickle', 'r')
+f = open('data/apogee_spectra_norm.pickle', 'r')        
 spectra = pickle.load(f)
 f.close()
-spectra = spectra[:, ~missing, :]
+
 wl = spectra[:, 0, 0]
 fluxes = spectra[:, :, 1].T
-ivars = (1./(spectra[:, :, 2]**2)).T  
+ivars = (1./(spectra[:, :, 2]**2)).T 
         
-# exclude pleiades
-pleiades = table['CLUSTER'] == 'Pleiades'
-training_labels = training_labels[~pleiades]
-fluxes = fluxes[~pleiades]
-ivars = ivars[~pleiades]
+# remove duplicates       
+foo, idx = np.unique(training_labels['APOGEE_ID'], return_index = True)
+training_labels = training_labels[idx]
+fluxes = fluxes[idx, :]
+ivars = ivars[idx, :]
+        
+# data masking       
+masking = training_labels['K'] < 0.
+training_labels = training_labels[~masking]
+fluxes = fluxes[~masking]
+ivars = ivars[~masking]
+
+# -------------------------------------------------------------------------------
+# # calculate K_MAG_ABS and Q
+# -------------------------------------------------------------------------------
+
+Q = 10**(0.2*training_labels['K']) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_err = training_labels['parallax_error'] * 10**(0.2*training_labels['K'])/100. 
+Q = Column(Q, name = 'Q_MAG')
+Q_err = Column(Q_err, name = 'Q_MAG_ERR')
+training_labels.add_column(Q, index = 12)
+training_labels.add_column(Q_err, index = 13)
 
 # -------------------------------------------------------------------------------
 # latex
@@ -117,7 +161,7 @@ plot_limits['ALPHA_FE'] = (-.2, .6)
 plot_limits['KMAG_ABS'] = (-1, -6)
 plot_limits['Q_MAG'] = (-3, 1)
 
-labels = np.array(['TEFF', 'LOGG', 'FE_H']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
+labels = np.array(['TEFF', 'LOGG', 'FE_H', 'Q_MAG']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
 Nlabels = len(labels)
 latex_labels = [latex[l] for l in labels]
 tr_label_input, tr_var_input = make_label_input(labels, training_labels)
@@ -130,7 +174,7 @@ print(Nlabels, tr_label_input.shape, tr_var_input.shape, fluxes.shape, ivars.sha
 X = fluxes
 X_ivar = ivars
 Y = tr_label_input
-Y_ivar = tr_var_input
+#Y_var = tr_var_input
 N, D = fluxes.shape
 
 # -------------------------------------------------------------------------------
@@ -164,7 +208,7 @@ for i, l in enumerate(labels):
     plt.ylim(plot_limits[l])
     plt.tight_layout()
     plt.legend(loc=2, fontsize=14, frameon=True)
-    plt.savefig('plots/NN/1to1_{0}.png'.format(l))
+    plt.savefig('plots/NN/1to1_{0}_RC.png'.format(l))
     plt.close()
 
 # -------------------------------------------------------------------------------'''

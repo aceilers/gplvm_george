@@ -15,8 +15,10 @@ import seaborn as sns
 import time
 import pickle
 from astropy.table import Column, Table, join
+import sys
+import schwimmbad 
 
-from functions_gplvm import lnL_Z, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial
+from functions_gplvm import lnL_Z, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial, DownloadSpectra
 from NN import Chi2_Matrix, NN
 
 # -------------------------------------------------------------------------------
@@ -31,11 +33,10 @@ matplotlib.rcParams['ytick.labelsize'] = 14
 matplotlib.rcParams['xtick.labelsize'] = 14
 fsize = 14
 
-
-# -------------------------------------------------------------------------------
-# load spectra and labels (Red Clump Stars)
-# -------------------------------------------------------------------------------
-
+## -------------------------------------------------------------------------------
+## load spectra and labels 
+## -------------------------------------------------------------------------------
+#
 ## loading training labels
 ##f = open('/Users/eilers/Dropbox/cygnet/data/training_labels_apogee_tgas.pickle', 'r')
 #f = open('data/training_labels_apogee_tgas.pickle', 'r')
@@ -69,6 +70,30 @@ fsize = 14
 # load spectra and labels (cluster stars)
 # -------------------------------------------------------------------------------
 
+# The APOGEE data file has more labels missing than the other file!!! 
+# QUESTION: WHERE SHOULD WE TAKE STELLAR LABELS FROM?!
+
+#create_data_set = False
+#
+#if create_data_set:
+#    table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
+#    table['col3'].name = 'CLUSTER'
+#    table['col2'].name = 'APOGEE_ID'
+#    
+#    # open APOGEE data
+#    apogee = Table.read('./data/allStar-l31c.2.fits', format='fits', hdu = 1)
+#    joined_data = join(table, apogee, keys = 'APOGEE_ID', join_type='left')
+#    
+#    foo, idx = np.unique(joined_data['APOGEE_ID'], return_index = True)
+#    training_labels = joined_data[idx]
+#    f = open('data/train_labels_cluster.pickle', 'w')  
+#    pickle.dump(training_labels, f)
+#    f.close()
+#
+#f = open('data/train_labels_cluster.pickle', 'r')    
+#training_labels = pickle.load(f)
+#f.close()
+
 table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
 table['col3'].name = 'CLUSTER'
 
@@ -83,18 +108,19 @@ training_labels['col3'].name = 'LOGG_ERR'
 training_labels['col4'].name = 'FE_H'
 training_labels['col5'].name = 'FE_H_ERR'
 
-# mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
-missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
-training_labels = training_labels[~missing]
-table = table[~missing]
-
 f = open('data/all_data_norm.pickle', 'r')    
 spectra = pickle.load(f)
 f.close()
-spectra = spectra[:, ~missing, :]
 wl = spectra[:, 0, 0]
 fluxes = spectra[:, :, 1].T
 ivars = (1./(spectra[:, :, 2]**2)).T  
+        
+# mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
+missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
+training_labels = training_labels[~missing]
+fluxes = fluxes[~missing]
+ivars = ivars[~missing]
+table = table[~missing]
         
 # exclude pleiades
 pleiades = table['CLUSTER'] == 'Pleiades'
@@ -103,57 +129,9 @@ fluxes = fluxes[~pleiades]
 ivars = ivars[~pleiades]
 
 ## -------------------------------------------------------------------------------
-## load spectra and labels (cluster stars)
+## # calculate K_MAG_ABS and Q
 ## -------------------------------------------------------------------------------
 #
-#create_data_set = True
-#
-#table = Table.read('data/meszaros13_table4.txt', format='ascii', data_start = 0) 
-#table['col2'].name = 'CLUSTER'
-#table['col1'].name = 'APOGEE_ID'
-#
-#     
-## exclude pleiades
-#pleiades = table['CLUSTER'] == 'Pleiades'
-#table = table[~pleiades]
-#
-#if create_data_set:
-#    
-#    # open APOGEE data
-#    apogee = Table.read('./data/allStar-l31c.2.fits', format='fits', hdu = 1)
-#    joined_data = join(table, apogee, keys = 'APOGEE_ID', join_type='left')
-#
-#    foo, idx = np.unique(joined_data['APOGEE_ID'], return_index = True)
-#    training_labels = joined_data[idx]
-#    f = open('data/train_labels_all.pickle', 'w')  
-#    pickle.dump(training_labels, f)
-#    f.close()
-#
-#else:
-#    f = open('data/train_labels_all.pickle', 'r')    
-#    training_labels = pickle.load(f)
-#    f.close()
-#    
-## set all missing labels to IVAR = 0.
-#
-## mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
-#missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
-#training_labels = training_labels[~missing]
-#table = table[~missing]
-#
-#f = open('data/all_data_norm.pickle', 'r')    
-#spectra = pickle.load(f)
-#f.close()
-#spectra = spectra[:, ~missing, :]
-#wl = spectra[:, 0, 0]
-#fluxes = spectra[:, :, 1].T
-#ivars = (1./(spectra[:, :, 2]**2)).T  
-
-
-# -------------------------------------------------------------------------------
-# # calculate K_MAG_ABS and Q
-# -------------------------------------------------------------------------------
-
 #Q = 10**(0.2*training_labels['K']) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
 #Q_err = training_labels['parallax_error'] * 10**(0.2*training_labels['K'])/100. 
 #Q = Column(Q, name = 'Q_MAG')
@@ -182,7 +160,7 @@ plot_limits['ALPHA_FE'] = (-.2, .6)
 plot_limits['KMAG_ABS'] = (-1, -6)
 plot_limits['Q_MAG'] = (-3, 1)
 
-labels = np.array(['TEFF', 'LOGG', 'FE_H']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
+labels = np.array(['TEFF']) #, 'LOGG', 'FE_H']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
 Nlabels = len(labels)
 latex_labels = [latex[l] for l in labels]
 tr_label_input, tr_var_input = make_label_input(labels, training_labels)
@@ -201,7 +179,7 @@ print('scales: {}'.format(scales))
 
 N = 50            # number of stars
 D = 100           # number of pixels
-Q = 6             # number latent dimensions, Q<=L
+Q = 3             # number latent dimensions, Q<=L
 L = len(labels)             # number of labels
 pixel = np.arange(D)
 wl_start = 500   
@@ -240,8 +218,8 @@ Y_var = tr_var_input_scaled[ind_train, :]
 # construct one covariance matrix for all pixels with median inverse covariance for each star
 # -------------------------------------------------------------------------------
 
-med_var = np.median(X_var, axis = 1)
-C_pix = np.diag(med_var)
+#med_var = np.median(X_var, axis = 1)
+#C_pix = np.diag(med_var)
 
 # inverse!
 #med_inv_var = np.median(1./X_var, axis = 1)
@@ -256,12 +234,14 @@ for n in range(N):
     for d in range(D):
         if 1./X_var[n, d] < 10.:
             X_mask[n, d] = False
+#            X_ivar[n, d] = 0.
 
 Y_mask = np.ones((N, L), dtype = bool)
 for n in range(N):
     for l in range(L):
         if 1./Y_var[n, l] < 1.:
             Y_mask[n, l] = False
+#            Y_ivar[n, l] = 0.
                        
 #good_labels[:, 0] = False
 #good_labels[10, 1] = False
@@ -301,6 +281,10 @@ Z = np.reshape(Z_initial, (N*Q,))
 print('initial hyper parameters: %s' %hyper_params)
 print('initial latent variables: %s' %Z)
 
+pool = schwimmbad.SerialPool()
+
+cygnet_likelihood = CygnetLikelihood(X, Y, Q, hyper_params, X_var, Y_var, X_mask, Y_mask)
+
 t1 = time.time()
 
 max_iter = 1
@@ -308,7 +292,7 @@ for t in range(max_iter):
     
 #    # optimize hyperparameters
 #    print("optimizing hyper parameters")
-#    res = op.minimize(lnL_h, x0 = hyper_params, args = (X, Y, Z, Z_initial, X_var, Y_var, C_pix), method = 'L-BFGS-B', jac = True, 
+#    res = op.minimize(lnL_h, x0 = hyper_params, args = (X, Y, Z, Z_initial, X_var, Y_var, X_mask, Y_mask), method = 'L-BFGS-B', jac = True, 
 #                      options={'gtol':1e-12, 'ftol':1e-12})
 #    
 #    # update hyperparameters
@@ -319,7 +303,9 @@ for t in range(max_iter):
     
     # optimize Z
     print("optimizing latent parameters")
-    res = op.minimize(lnL_Z, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var, C_pix, X_mask, Y_mask), method = 'L-BFGS-B', jac = True, 
+#    res = op.minimize(lnL_Z_old, x0 = Z, args = (X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask, Y_mask), method = 'L-BFGS-B', jac = True, 
+#                      options={'gtol':1e-12, 'ftol':1e-12})
+    res = op.minimize(cygnet_likelihood, x0 = Z, args=(pool,), method = 'L-BFGS-B', jac = True, 
                       options={'gtol':1e-12, 'ftol':1e-12})
              
     # update Z
@@ -327,6 +313,8 @@ for t in range(max_iter):
     print(res)
     print('success: {}'.format(res.success))
     # print('new Z: {}'.format(res.x))
+
+sys.exit(0)
 
 t2 = time.time()
 print('optimization in {} s.'.format(t2-t1))
