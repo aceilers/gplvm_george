@@ -9,16 +9,17 @@ Created on Mon Nov 13 11:58:25 2017
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('TkAgg')
 import scipy.optimize as op
 import seaborn as sns
 import time
 import pickle
 from astropy.table import Column, Table, join
 import sys
-import schwimmbad 
+from astropy.io import fits
+#import schwimmbad 
 
-from functions_gplvm import lnL_Z_old, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial, DownloadSpectra
+from functions_gplvm import lnL_Z_old, lnL_h, mean_var, kernelRBF, predictX, make_label_input, get_pivots_and_scales, PCAInitial
 from NN import Chi2_Matrix, NN
 
 # -------------------------------------------------------------------------------
@@ -66,67 +67,67 @@ fsize = 14
 #fluxes = fluxes[~masking]
 #ivars = ivars[~masking]
 
-# -------------------------------------------------------------------------------
-# load spectra and labels (cluster stars)
-# -------------------------------------------------------------------------------
-
-# The APOGEE data file has more labels missing than the other file!!! 
-# QUESTION: WHERE SHOULD WE TAKE STELLAR LABELS FROM?!
-
-#create_data_set = False
+## -------------------------------------------------------------------------------
+## load spectra and labels (cluster stars)
+## -------------------------------------------------------------------------------
+##
+## The APOGEE data file has more labels missing than the other file!!! 
+## QUESTION: WHERE SHOULD WE TAKE STELLAR LABELS FROM?!
+##
+##create_data_set = False
+##
+##if create_data_set:
+##    table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
+##    table['col3'].name = 'CLUSTER'
+##    table['col2'].name = 'APOGEE_ID'
+##    
+##    # open APOGEE data
+##    apogee = Table.read('./data/allStar-l31c.2.fits', format='fits', hdu = 1)
+##    joined_data = join(table, apogee, keys = 'APOGEE_ID', join_type='left')
+##    
+##    foo, idx = np.unique(joined_data['APOGEE_ID'], return_index = True)
+##    training_labels = joined_data[idx]
+##    f = open('data/train_labels_cluster.pickle', 'w')  
+##    pickle.dump(training_labels, f)
+##    f.close()
+##
+##f = open('data/train_labels_cluster.pickle', 'r')    
+##training_labels = pickle.load(f)
+##f.close()
 #
-#if create_data_set:
-#    table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
-#    table['col3'].name = 'CLUSTER'
-#    table['col2'].name = 'APOGEE_ID'
-#    
-#    # open APOGEE data
-#    apogee = Table.read('./data/allStar-l31c.2.fits', format='fits', hdu = 1)
-#    joined_data = join(table, apogee, keys = 'APOGEE_ID', join_type='left')
-#    
-#    foo, idx = np.unique(joined_data['APOGEE_ID'], return_index = True)
-#    training_labels = joined_data[idx]
-#    f = open('data/train_labels_cluster.pickle', 'w')  
-#    pickle.dump(training_labels, f)
-#    f.close()
+#table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
+#table['col3'].name = 'CLUSTER'
 #
-#f = open('data/train_labels_cluster.pickle', 'r')    
+#f = open('data/train_labels_feh.pickle', 'r')    
 #training_labels = pickle.load(f)
 #f.close()
-
-table = Table.read('data/meszaros13_table4_mod_new.txt', format='ascii', data_start = 0) 
-table['col3'].name = 'CLUSTER'
-
-f = open('data/train_labels_feh.pickle', 'r')    
-training_labels = pickle.load(f)
-f.close()
-training_labels = Table(training_labels)
-training_labels['col0'].name = 'TEFF'
-training_labels['col1'].name = 'TEFF_ERR'
-training_labels['col2'].name = 'LOGG'
-training_labels['col3'].name = 'LOGG_ERR'
-training_labels['col4'].name = 'FE_H'
-training_labels['col5'].name = 'FE_H_ERR'
-
-f = open('data/all_data_norm.pickle', 'r')    
-spectra = pickle.load(f)
-f.close()
-wl = spectra[:, 0, 0]
-fluxes = spectra[:, :, 1].T
-ivars = (1./(spectra[:, :, 2]**2)).T  
-        
-# mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
-missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
-training_labels = training_labels[~missing]
-fluxes = fluxes[~missing]
-ivars = ivars[~missing]
-table = table[~missing]
-        
-# exclude pleiades
-pleiades = table['CLUSTER'] == 'Pleiades'
-training_labels = training_labels[~pleiades]
-fluxes = fluxes[~pleiades]
-ivars = ivars[~pleiades]
+#training_labels = Table(training_labels)
+#training_labels['col0'].name = 'TEFF'
+#training_labels['col1'].name = 'TEFF_ERR'
+#training_labels['col2'].name = 'LOGG'
+#training_labels['col3'].name = 'LOGG_ERR'
+#training_labels['col4'].name = 'FE_H'
+#training_labels['col5'].name = 'FE_H_ERR'
+#
+#f = open('data/all_data_norm.pickle', 'r')    
+#spectra = pickle.load(f)
+#f.close()
+#wl = spectra[:, 0, 0]
+#fluxes = spectra[:, :, 1].T
+#ivars = (1./(spectra[:, :, 2]**2)).T  
+#        
+## mask all spectra with a -9999.9 entry! (all spectra have [alpha/Fe] measured)
+#missing = np.logical_or(training_labels['TEFF'] < -9000., training_labels['LOGG'] < -9000., training_labels['FE_H'] < -9000.)
+#training_labels = training_labels[~missing]
+#fluxes = fluxes[~missing]
+#ivars = ivars[~missing]
+#table = table[~missing]
+#        
+## exclude pleiades
+#pleiades = table['CLUSTER'] == 'Pleiades'
+#training_labels = training_labels[~pleiades]
+#fluxes = fluxes[~pleiades]
+#ivars = ivars[~pleiades]
 
 ## -------------------------------------------------------------------------------
 ## # calculate K_MAG_ABS and Q
@@ -140,6 +141,52 @@ ivars = ivars[~pleiades]
 #training_labels.add_column(Q_err, index = 13)
 
 # -------------------------------------------------------------------------------
+# load spectra and labels (giant stars)
+# -------------------------------------------------------------------------------
+
+#f = open('data/training_labels_apogee_tgas_giants.pickle', 'r')    
+#training_labels = pickle.load(f)
+#f.close()
+
+hdulist = fits.open('data/training_labels_apogee_tgas_giants.fits')
+training_labels = hdulist[1].data
+       
+f = open('data/apogee_spectra_norm_giants.pickle', 'r')    
+spectra = pickle.load(f)
+f.close()
+
+wl = spectra[:, 0, 0]
+fluxes = spectra[:, :, 1].T
+ivars = (1./(spectra[:, :, 2]**2)).T 
+        
+# add pixel mask to remove gaps between chips! Otherwise code fails because all pixels are being masked in the gaps!
+gaps = (np.sum(fluxes, axis = 0)) == float(fluxes.shape[0])
+wl = wl[~gaps]
+fluxes = fluxes[:, ~gaps]
+ivars = ivars[:, ~gaps]
+
+# -------------------------------------------------------------------------------
+# load spectra and labels (validation set)
+# -------------------------------------------------------------------------------
+                                    
+#f = open('data/training_labels_apogee_tgas_validation.pickle', 'r')    
+#training_labels_validation = pickle.load(f)
+#f.close()
+
+hdulist = fits.open('data/training_labels_apogee_tgas_validation.fits')
+training_labels_validation = hdulist[1].data
+
+f = open('data/apogee_spectra_norm_validation.pickle', 'r')    
+spectra_validation = pickle.load(f)
+f.close()                 
+
+fluxes_validation = spectra_validation[:, :, 1].T
+ivars_validation = (1./(spectra_validation[:, :, 2]**2)).T 
+
+fluxes_validation = fluxes_validation[:, ~gaps]
+ivars_validation = ivars_validation[:, ~gaps]
+
+# -------------------------------------------------------------------------------
 # latex
 # -------------------------------------------------------------------------------
 
@@ -150,7 +197,7 @@ latex["FE_H"] = r"$\rm [Fe/H]$"
 latex["ALPHA_M"] = r"$[\alpha/\rm M]$"
 latex["C_FE"] = r"$\rm [C/Fe]$"
 latex["N_FE"] = r"$\rm [N/Fe]$"
-latex["Q_MAG"] = r"$Q$"
+latex["Q_K"] = r"$Q_K$"
 
 plot_limits = {}
 plot_limits['TEFF'] = (3000, 7000)
@@ -158,12 +205,13 @@ plot_limits['FE_H'] = (-2.5, 1)
 plot_limits['LOGG'] = (0, 4.)
 plot_limits['ALPHA_FE'] = (-.2, .6)
 plot_limits['KMAG_ABS'] = (-1, -6)
-plot_limits['Q_MAG'] = (-3, 1)
+plot_limits['Q_K'] = (0, 1)
 
-labels = np.array(['TEFF']) #, 'LOGG', 'FE_H']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
+labels = np.array(['Q_K']) #, 'LOGG', 'FE_H']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
 Nlabels = len(labels)
 latex_labels = [latex[l] for l in labels]
 tr_label_input, tr_var_input = make_label_input(labels, training_labels)
+tr_label_validation, tr_var_validation = make_label_input(labels, training_labels_validation)
 print(Nlabels, tr_label_input.shape, tr_var_input.shape, fluxes.shape, ivars.shape) 
 
 
@@ -177,25 +225,27 @@ print('scales: {}'.format(scales))
 # constants
 # -------------------------------------------------------------------------------
 
-N = 50            # number of stars
-D = 100           # number of pixels
-Q = 3             # number latent dimensions, Q<=L
-L = len(labels)             # number of labels
+N = 100 #len(tr_label_input)         # number of stars
+D = 100 #len(wl)                     # number of pixels
+Q = 3                           # number latent dimensions, Q<=L
+L = len(labels)                 # number of labels
 pixel = np.arange(D)
-wl_start = 500   
+wl_start = 500  
 
 theta_rbf, gamma_rbf = 0.1, 1. 
 theta_band, gamma_band = 1e-4, 1e-4 
 
-name = '{0}_{1}_{2}_{3}_Q{4}_D{5}_N{6}'.format(theta_rbf, theta_band, gamma_rbf, gamma_band, Q, D, N)
-date = 'speed' # 'Q_tests' #
+name = '{0}_{1}_{2}_{3}_Q{4}_D{5}_N{6}_gtol12_ftol12_newpredict'.format(theta_rbf, theta_band, gamma_rbf, gamma_band, Q, D, N)
+date = 'test_optimizer' # 'Q_tests' #
 
 # -------------------------------------------------------------------------------
 # take random indices
 # -------------------------------------------------------------------------------
 
-np.random.seed(30)
-ind_train = np.random.choice(np.arange(fluxes.shape[0]), (N,))
+np.random.seed(42)
+indices = np.arange(fluxes.shape[0])
+#np.random.shuffle(indices)
+ind_train = indices[:N]
 
 # make a rand_label = np.random(size = N)
 
@@ -268,9 +318,8 @@ plt.close()
 
 hyper_params = np.array([theta_rbf, theta_band, gamma_rbf, gamma_band])
 
-
 #Z_initial = np.zeros((N, Q)) 
-#Z_initial[:, :L] = Y[:]
+#Z_initial[:, :L] = Y[:]                # THIS DOESN'T WORK IF Q > L! ALL MISSING DIMENSIONS STAY 0!!
 Z_initial = PCAInitial(X, Q)            # PCA initialize, use mean as first component, i.e. 1 as initial guess for Z_initial for each star
 Z = np.reshape(Z_initial, (N*Q,))
 
@@ -279,10 +328,9 @@ Z = np.reshape(Z_initial, (N*Q,))
 # -------------------------------------------------------------------------------
 
 print('initial hyper parameters: %s' %hyper_params)
-print('initial latent variables: %s' %Z)
+#print('initial latent variables: %s' %Z)
 
-pool = schwimmbad.SerialPool()
-
+#pool = schwimmbad.SerialPool()
 #cygnet_likelihood = CygnetLikelihood(X, Y, Q, hyper_params, X_var, Y_var, X_mask, Y_mask)
 
 t1 = time.time()
@@ -418,17 +466,21 @@ print('prediction of test object:')
 
 
 # new testing objects
-ind_test = np.array([10, 20, 50, 100, 120, 150, 200, 220, 250, 300, 320, 350, 400, 420]) #np.random.choice(np.arange(fluxes.shape[0]), (N_new,))
+#ind_test = np.array([10, 20, 50, 100, 120]) #, 150, 200, 220, 250, 300, 320, 350, 400, 420]) #np.random.choice(np.arange(fluxes.shape[0]), (N_new,))
+#ind_test = indices[N:]
+
+ind_test = np.arange(fluxes_validation.shape[0])[:10]
 Y_new_test = np.zeros((len(ind_test), L))
 Z_new_test = np.zeros((len(ind_test), Q))
 N_new = len(ind_test)
 
-X_new = fluxes[ind_test, wl_start:wl_start+D] - X_mean
-X_ivar_new = ivars[ind_test, wl_start:wl_start+D]
+X_new = fluxes_validation[ind_test, wl_start:wl_start+D] - X_mean
+X_ivar_new = ivars_validation[ind_test, wl_start:wl_start+D]
 
 chi2 = Chi2_Matrix(X, 1./X_var, X_new, X_ivar_new)
 all_NN = np.zeros((len(ind_test), L))
 
+all_chis = []
 
 for i in range(N_new):
     
@@ -444,6 +496,7 @@ for i in range(N_new):
     j = 0
     mean_new, var_new, foo = mean_var(Z_final, Z_new_n, X, X_var, kernel1, theta_rbf, theta_band)
     chi2_test = np.sum(((X_new[i, :] - mean_new)**2) * X_ivar_new[i, :])
+    all_chis.append(chi2_test)
     plt.figure(figsize=(8, 6))
     plt.tick_params(axis=u'both', direction='in', which='both')
     plt.plot(wl[wl_start:wl_start+D], X_new[i, :] + X_mean, label='original data', color='k')
@@ -458,9 +511,15 @@ for i in range(N_new):
     plt.savefig('plots/{0}/testing_object_{1}_{2}.png'.format(date, name, ind_test[i]))
     plt.close()
 
+plt.hist(all_chis)
+plt.title(r'# of stars: {0}, $\theta_{{\rm band}} = {1},\,\theta_{{\rm rbf}} = {2},\, \gamma_{{\rm band}} = {3},\,\gamma_{{\rm rbf}} = {4}$'.format(len(ind_test), theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize = 12)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.xlabel(r'$\chi^2$', fontsize = fsize)
+plt.savefig('plots/{0}/all_chis_{1}.png'.format(date, name))
+plt.close()
 
 # testing labels    
-Y_old = tr_label_input[ind_test, :]
+Y_old = tr_label_validation[ind_test, :]
 Y_new_rescaled = np.zeros_like(Y_new_test)
 all_NN_rescaled = np.zeros_like(all_NN)
 
@@ -472,15 +531,16 @@ for i, l in enumerate(labels):
 
     orig = Y_old[:, i]
     gp_values = Y_new_rescaled[:, i]
-    scatter = np.round(np.std(orig - gp_values), 5)
-    bias = np.round(np.mean(orig - gp_values), 5)    
-    scatter_nn = np.round(np.std(orig - all_NN_rescaled[:, i]), 5)
-    bias_nn = np.round(np.mean(orig - all_NN_rescaled[:, i]), 5)
+    scatter = np.round(np.std(orig - gp_values), 4)
+    bias = np.round(np.mean(orig - gp_values), 4)    
+    #scatter_nn = np.round(np.std(orig - all_NN_rescaled[:, i]), 5)
+    #bias_nn = np.round(np.mean(orig - all_NN_rescaled[:, i]), 5)    
+    chi2_label = np.round(np.sum((orig - gp_values)**2 /tr_var_validation), 4)
     
     xx = [-10000, 10000]
     plt.figure(figsize=(6, 6))
-    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1}'.format(bias, scatter), marker = 'o')
-    plt.scatter(orig, all_NN_rescaled[:, i], color=colors[0], label=' NN: bias = {0} \n scatter = {1}'.format(bias_nn, scatter_nn), marker = 'o')
+    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1} \n $\chi^2$ = {2}'.format(bias, scatter, chi2_label), marker = 'o')
+    #plt.scatter(orig, all_NN_rescaled[:, i], color=colors[0], label=' NN: bias = {0} \n scatter = {1}'.format(bias_nn, scatter_nn), marker = 'o')
     plt.plot(xx, xx, color=colors[2], linestyle='--')
     plt.xlabel(r'reference labels {}'.format(latex[l]), size=fsize)
     plt.ylabel(r'inferred values {}'.format(latex[l]), size=fsize)
@@ -489,30 +549,41 @@ for i, l in enumerate(labels):
     plt.ylim(plot_limits[l])
     plt.tight_layout()
     plt.legend(loc=2, fontsize=14, frameon=True)
-    plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(len(ind_test), D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=fsize)
+    plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(len(ind_test), D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=11)
     plt.savefig('plots/{0}/1to1_test_{1}_{2}.png'.format(date, l, name))
     plt.close()
     
-# calculate distribution of chi^2 for all spectra... (or 100 randomly chosen ones...)
-#np.random.seed(10)
-#chis = []
-#for i in range(100):
-#    ind_test_i = np.random.choice(np.arange(len(fluxes)), (N_new,)) #np.array([ind_test[i]])
-#    print ind_test_i
-#    X_new = fluxes[ind_test_i, wl_start:wl_start+D] - X_mean
-#    X_new_var = 1./ivars[ind_test_i, wl_start:wl_start+D]    
-#    Z_new, Y_new, success_z, success_y = predictX(N_new, X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params)    
-#    j = 0
-#    mean_new, var_new, foo = mean_var(Z_final, Z_new[j, :], X, X_var, kernel1, theta_rbf, theta_band)
-#    chi2_test = np.sum((X_new[j, :] - mean_new)**2/X_new_var[j, :])
-#    chis.append(chi2_test)
-#plt.hist(chis, label = r'$\langle \chi^2\rangle = {0}$'.format(np.median(chis)))
-#plt.tick_params(axis=u'both', direction='in', which='both')
-#plt.xlabel(r'$\chi^2$')
-#plt.ylabel('counts')
-#plt.legend(frameon=True)
-#plt.title(r'$\theta_{{rbf}} = {0}, \theta_{{band}} = {1}, \gamma_{{rbf}} = {2}, \gamma_{{band}} = {3}$'.format(theta_rbf, theta_band, gamma_rbf, gamma_band))
-#plt.savefig('plots/{0}/chis_{1}.png'.format(date, name))
+    if l == 'Q_K' or 'Q_L':
+        orig = 5. * (np.log10(Y_old[:, i]) + 1)
+        gp_values = 5. * (np.log10(Y_new_rescaled[:, i]) + 1)
+        scatter = np.round(np.std(orig - gp_values), 4)
+        bias = np.round(np.mean(orig - gp_values), 4)    
+        if l == 'Q_K':
+            chi2_label = np.round(np.sum((orig - gp_values)**2 / training_labels_validation['K_ERR'][:10]), 4)
+        else:
+            chi2_label = np.round(np.sum((orig - gp_values)**2 / training_labels_validation['L_ERR'][:10]), 4)        
+        xx = [-10000, 10000]
+        plt.figure(figsize=(6, 6))
+        plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1} \n $\chi^2$ = {2}'.format(bias, scatter, chi2_label), marker = 'o')
+        #plt.scatter(orig, all_NN_rescaled[:, i], color=colors[0], label=' NN: bias = {0} \n scatter = {1}'.format(bias_nn, scatter_nn), marker = 'o')
+        plt.plot(xx, xx, color=colors[2], linestyle='--')
+        if l == 'Q_K':
+            plt.xlabel(r'reference labels $M_{K}$', size=fsize)
+            plt.ylabel(r'inferred values $M_{K}$', size=fsize)
+        else:
+            plt.xlabel(r'reference labels $M_{L}$', size=fsize)
+            plt.ylabel(r'inferred values $M_{L}$', size=fsize)            
+        plt.tick_params(axis=u'both', direction='in', which='both')
+        plt.xlim(0, 8)
+        plt.ylim(0, 8)
+        plt.tight_layout()
+        plt.legend(loc=2, fontsize=14, frameon=True)
+        plt.title('#stars: {0}, #pixels: {1}, $\\theta_{{band}} = {4}$, $\\theta_{{rbf}} = {5}$, $\gamma_{{band}} = {6}$, $\gamma_{{rbf}} = {7}$'.format(len(ind_test), D, L, Q, theta_band, theta_rbf, gamma_band, gamma_rbf), fontsize=11)
+        if l == 'Q_K':        
+            plt.savefig('plots/{0}/1to1_test_{1}_{2}.png'.format(date, 'M_K', name))
+        else:        
+            plt.savefig('plots/{0}/1to1_test_{1}_{2}.png'.format(date, 'M_L', name))
+        plt.close()
 
 
 # -------------------------------------------------------------------------------

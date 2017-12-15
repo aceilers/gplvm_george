@@ -7,21 +7,28 @@ Created on Thu Nov 30 11:04:16 2017
 """
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import pickle
 from astropy.table import Table, Column
 import seaborn as sns
+from astropy.io import fits
 
 from functions_gplvm import make_label_input
 
 colors = ["windows blue", "amber", "greyish", "faded green", "dusty purple", "pale red", "orange", "red", "blue"]
 colors = sns.xkcd_palette(colors)
+lsize = 14
+sns.set(rc={'axes.facecolor':'white', 'figure.facecolor':'white', 'axes.edgecolor':'black', 'xtick.direction': 'in', 'ytick.direction': 'in'})
+sns.set_style("ticks")
+matplotlib.rcParams['ytick.labelsize'] = lsize
+matplotlib.rcParams['xtick.labelsize'] = lsize
 
 # -------------------------------------------------------------------------------
 # functions
 # -------------------------------------------------------------------------------
 
-def Chi2_Matrix(Y1, Y1_ivar, Y2, Y2_ivar, infinite_diagonal=False):
+def Chi2_Matrix(Y1, Y1_ivar, Y2, Y2_ivar, infinite_diagonal = False):
     """
     Returns N1 x N2 matrix of chi-squared values.
     A clever user will decide on the Y1 vs Y2 choice sensibly.
@@ -41,8 +48,9 @@ def Chi2_Matrix(Y1, Y1_ivar, Y2, Y2_ivar, infinite_diagonal=False):
     for n1 in range(N1):
         for n2 in range(N2):
             xx = Y2[n2, :] - Y1[n1, :]
-            denominator = Y2_ivar[n2, :] + Y1_ivar[n1, :]
-            ivar = Y2_ivar[n2, :] * Y1_ivar[n1, :] / (denominator + (denominator <= 0.))
+            # asymmetric chi2 -- take only variance of testing object!
+            denominator = Y2_ivar[n2, :] #+ Y1_ivar[n1, :]
+            ivar = Y2_ivar[n2, :] / (denominator + (denominator <= 0.)) #* Y1_ivar[n1, :]
             chi2[n1, n2] = np.sum(ivar * xx**2)
         if infinite_diagonal and n1 < N2:
             chi2[n1, n1] = np.Inf
@@ -59,7 +67,202 @@ def NN(index, chi2, labels):
     return labels[np.argmin(chi2[:, index]), :], np.argmin(chi2[:, index])
 
 
+'''# -------------------------------------------------------------------------------
+# load spectra and labels (giant stars)
+# -------------------------------------------------------------------------------
+
+f = open('data/training_labels_apogee_tgas_giants.pickle', 'r')    
+training_labels = pickle.load(f)
+f.close()
+
+f = open('data/apogee_spectra_norm_giants.pickle', 'r')    
+spectra = pickle.load(f)
+f.close()
+
+#bins = np.linspace(0, 500, 21)
+#plt.hist(training_labels['SNR'], bins)
+#plt.axvline(100, color = 'r')
+#plt.tick_params(axis=u'both', direction='in', which='both')
+#plt.xlabel('S/N')
+#plt.savefig('plots/NN_mag/SN_cut.png') 
+#
+## remove low S/N data + one super large outlier
+##bad = np.logical_or(training_labels['SNR'] < 100., training_labels['SNR'] > 1000.)
+#bad = training_labels['SNR'] > 1000.
+#training_labels = training_labels[~bad]
+#spectra = spectra[:, ~bad, :]                    
+
+wl = spectra[:, 0, 0]
+fluxes = spectra[:, :, 1].T
+ivars = (1./(spectra[:, :, 2]**2)).T 
+        
+# -------------------------------------------------------------------------------
+# load spectra and labels (validation set)
+# -------------------------------------------------------------------------------
+
+#hdulist = fits.open('data/training_labels_apogee_tgas_validation.fits')
+#training_labels_validation = hdulist[1].data
+                                    
+f = open('data/training_labels_apogee_tgas_validation.pickle', 'r')    
+training_labels_validation = pickle.load(f)
+f.close()
+
+f = open('data/apogee_spectra_norm_validation.pickle', 'r')    
+spectra_validation = pickle.load(f)
+f.close()                 
+
+fluxes_validation = spectra_validation[:, :, 1].T
+ivars_validation = (1./(spectra_validation[:, :, 2]**2)).T 
+
+# -------------------------------------------------------------------------------
+# latex
+# -------------------------------------------------------------------------------
+
+latex = {}
+latex["TEFF"] = r"$T_{\rm eff}$"
+latex["LOGG"] = r"$\log g$"
+latex["FE_H"] = r"$\rm [Fe/H]$"
+latex["ALPHA_M"] = r"$[\alpha/\rm M]$"
+latex["C_FE"] = r"$\rm [C/Fe]$"
+latex["N_FE"] = r"$\rm [N/Fe]$"
+latex["Q_K"] = r"$Q_{K}$"
+
+plot_limits = {}
+plot_limits['TEFF'] = (3000, 7000)
+plot_limits['FE_H'] = (-2.5, 1)
+plot_limits['LOGG'] = (0, 4.)
+plot_limits['ALPHA_FE'] = (-.2, .6)
+plot_limits['KMAG_ABS'] = (-1, -6)
+plot_limits['Q_K'] = (0, 1.2)
+
+labels = np.array(['TEFF', 'LOGG', 'FE_H', 'Q_K']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
+Nlabels = len(labels)
+latex_labels = [latex[l] for l in labels]
+tr_label_input, tr_var_input = make_label_input(labels, training_labels)
+tr_label_validation, tr_var_validation = make_label_input(labels, training_labels_validation)
+print(Nlabels, tr_label_input.shape, tr_var_input.shape, fluxes.shape, ivars.shape) 
+
+# -------------------------------------------------------------------------------
+# input data
+# -------------------------------------------------------------------------------
+
+X = fluxes
+X_ivar = ivars
+Y = tr_label_input
+N, D = fluxes.shape
+N, L = tr_label_input.shape
+
+X2 = fluxes_validation
+X2_ivar = ivars_validation
+N2, D = fluxes_validation.shape
+
+# -------------------------------------------------------------------------------
+# validation with NN
+# -------------------------------------------------------------------------------
+
+chi2 = Chi2_Matrix(X, X_ivar, X2, X2_ivar)
+
+plt.imshow(1./chi2, interpolation = None, cmap = 'viridis')
+plt.colorbar()
+plt.savefig('plots/NN_mag/chi2_giants_asym_validation.png')
+
+new_labels = np.zeros((N2, L))
+
+for i in range(N2):
+    lab_i, index = NN(i, chi2, Y)
+    new_labels[i, :] = lab_i
+
+
+for i, l in enumerate(labels):
+
+    orig = tr_label_validation[:, i]
+    gp_values = new_labels[:, i]
+    scatter = np.round(np.std(orig - gp_values), 5)
+    bias = np.round(np.mean(orig - gp_values), 5)    
+    
+    xx = [-10000, 10000]
+    plt.figure(figsize=(6, 6))
+    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1}'.format(bias, scatter), marker = 'o')
+    plt.plot(xx, xx, color=colors[2], linestyle='--')
+    plt.xlabel(r'reference labels {}'.format(latex[l]), size=14)
+    plt.ylabel(r'inferred values {}'.format(latex[l]), size=14)
+    plt.tick_params(axis=u'both', direction='in', which='both')
+    plt.xlim(plot_limits[l])
+    plt.ylim(plot_limits[l])
+    plt.tight_layout()
+    plt.legend(loc=2, fontsize=14, frameon=True)
+    plt.savefig('plots/NN_mag/1to1_{0}_asym_validation.png'.format(l))
+    plt.close()
+
+## -------------------------------------------------------------------------------'''
+## cross validation with NN
 ## -------------------------------------------------------------------------------
+#
+#chi2 = Chi2_Matrix(X, X_ivar, X, X_ivar, infinite_diagonal = True)
+#
+#plt.imshow(1./chi2, interpolation = None, cmap = 'viridis')
+#plt.colorbar()
+##plt.axhline(13, color = 'r')
+##plt.axhline(34, color = 'r')
+##plt.axhline(35, color = 'r')
+#plt.savefig('plots/NN_mag/chi2_giants_asym.png')
+#
+#new_labels = np.zeros_like(Y)
+#
+#for i in range(N):
+#    lab_i, index = NN(i, chi2, Y)
+#    new_labels[i, :] = lab_i
+#
+#
+#for i, l in enumerate(labels):
+#
+#    orig = Y[:, i]
+#    gp_values = new_labels[:, i]
+#    scatter = np.round(np.std(orig - gp_values), 5)
+#    bias = np.round(np.mean(orig - gp_values), 5)    
+#    
+#    xx = [-10000, 10000]
+#    plt.figure(figsize=(6, 6))
+#    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1}'.format(bias, scatter), marker = 'o')
+#    plt.plot(xx, xx, color=colors[2], linestyle='--')
+#    plt.xlabel(r'reference labels {}'.format(latex[l]), size=14)
+#    plt.ylabel(r'inferred values {}'.format(latex[l]), size=14)
+#    plt.tick_params(axis=u'both', direction='in', which='both')
+#    plt.xlim(plot_limits[l])
+#    plt.ylim(plot_limits[l])
+#    plt.tight_layout()
+#    plt.legend(loc=2, fontsize=14, frameon=True)
+#    plt.savefig('plots/NN_mag/1to1_{0}_asym.png'.format(l))
+#    plt.close()
+
+## -------------------------------------------------------------------------------
+## find three spectra that seem to dominate...
+## -------------------------------------------------------------------------------
+#    
+#chi2 = Chi2_Matrix(X, X_ivar, X, X_ivar, infinite_diagonal = False)
+#
+#sums = np.mean(chi2, axis = 0) 
+#print np.argmin(sums)   
+#print training_labels['SNR'][np.argmin(sums)] # minimum SNR!! 25
+#print min(training_labels['SNR'])
+#
+## remove minimum
+#bad = sums == np.min(sums)
+#sums = sums[~bad]
+#training_labels = training_labels[~bad]
+#print len(sums)
+#print np.argmin(sums)
+#print training_labels['SNR'][np.argmin(sums)]  # 155
+#
+## remove minimum
+#bad = sums == np.min(sums)
+#sums = sums[~bad]
+#training_labels = training_labels[~bad]
+#print len(sums)
+#print np.argmin(sums)
+#print training_labels['SNR'][np.argmin(sums)]   
+                    
+## -------------------------------------------------------------------------------'''
 ## load spectra and labels (cluster stars)
 ## -------------------------------------------------------------------------------
 #

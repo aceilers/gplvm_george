@@ -7,7 +7,7 @@ Created on Tue Aug  8 20:10:52 2017
 """
 
 import numpy as np
-from astropy.table import Table, hstack, join
+from astropy.table import Table, hstack, join, Column
 import os.path
 import subprocess
 from astropy.io import fits
@@ -59,20 +59,30 @@ id_tgas, id_apogee, d2d, d3d = apogee_cat.search_around_sky(tgas_cat, 0.001*u.de
 
 tgas_data = tgas_data[id_tgas]
 apogee_data = apogee_data[id_apogee]    
-print('matched entries: {}'.format(len(tgas_data)))
+print('matched entries APOGEE-TGAS: {}'.format(len(tgas_data)))
 
 # -------------------------------------------------------------------------------
 # hack! Cut down to only high quality data!
 # -------------------------------------------------------------------------------
 
-cut = tgas_data['parallax']/tgas_data['parallax_error'] > 10.
+cut = np.logical_and(tgas_data['parallax']/tgas_data['parallax_error'] > 8., tgas_data['parallax']/tgas_data['parallax_error'] <= 10.)
 tgas_data = tgas_data[cut]              
 apogee_data = apogee_data[cut] 
-             
+print('parallax quality cut: {}'.format(len(tgas_data)))
+
+# -------------------------------------------------------------------------------
+# cut in logg... take only giants!
+# -------------------------------------------------------------------------------
+
+cut = np.logical_and(apogee_data['LOGG'] <= 2.5, apogee_data['LOGG'] > 0.)
+apogee_data = apogee_data[cut]
+tgas_data = tgas_data[cut]
+print('logg <= 2.5 cut: {}'.format(len(apogee_data)))
+            
 # -------------------------------------------------------------------------------
 # get APOGEE spectra
 # -------------------------------------------------------------------------------
-'''delete0 = 'find ./data/spectra/ -size 0c -delete'
+delete0 = 'find ./data/spectra/ -size 0c -delete'
 subprocess.call(delete0, shell = True)
 
 for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCATION_ID'], apogee_data['FIELD'])):
@@ -82,8 +92,8 @@ for i, (fn2, loc, field) in enumerate(zip(apogee_data['FILE'], apogee_data['LOCA
     fn = fn2.replace('apStar-r8', 'aspcapStar-r8-l31c.2')
     destination2 = './data/spectra/' + fn2.strip()
     destination = './data/spectra/' + fn.strip()
-    print(loc, destination, os.path.isfile(destination))
-    print(loc, destination2, os.path.isfile(destination2))
+    #print(loc, destination, os.path.isfile(destination))
+    #print(loc, destination2, os.path.isfile(destination2))
     
     if not (os.path.isfile(destination) or os.path.isfile(destination2)):
         if loc == 1:
@@ -127,7 +137,7 @@ destination = './data/spectra/'
 for i in range(len(apogee_data['FILE'])):
     entry = destination + (apogee_data['FILE'][i]).strip()
     entry2 = entry.replace('apStar-r8', 'aspcapStar-r8-l31c.2').strip()
-    print(entry, entry2)
+    #print(entry, entry2)
     try:
         hdulist = fits.open(entry)
     except:
@@ -137,13 +147,13 @@ for i in range(len(apogee_data['FILE'])):
             print(entry + " " + entry2 + " not found or corrupted; deleting!")
             cmd = 'rm -vf ' + entry + ' ' + entry2
             subprocess.call(cmd, shell = True)
-            print(i, apogee_data['FILE'][i], apogee_data['FIELD'][i], apogee_data['LOCATION_ID'][i])
+            #print(i, apogee_data['FILE'][i], apogee_data['FIELD'][i], apogee_data['LOCATION_ID'][i])
             found[i] = False
 
 tgas_data = tgas_data[found]                     
 apogee_data = apogee_data[found]    
 
-print('spectra found for: {}'.format(len(apogee_data)))
+print('APOGEE spectra found for: {}'.format(len(apogee_data)))
  
 # -------------------------------------------------------------------------------
 # normalize spectra: functions
@@ -250,7 +260,7 @@ def NormalizeData(dataall):
 # normalize spectra
 # -------------------------------------------------------------------------------
 
-file_name = 'apogee_spectra_norm_nocuts.pickle'
+file_name = 'apogee_spectra_norm_validation.pickle'
 
 destination = './data/' + file_name
 if not os.path.isfile(destination):
@@ -268,6 +278,20 @@ pickle.dump(training_labels, f)
 f.close()  
 
 # -------------------------------------------------------------------------------'''
+# open files!
+# -------------------------------------------------------------------------------
+
+#f = open('data/apogee_spectra_norm_nocuts.pickle', 'r')
+#spectra = pickle.load(f)
+#f.close() 
+
+f = open('data/training_labels_apogee_tgas_nocuts.pickle', 'r')
+training_labels = pickle.load(f)
+f.close() 
+
+# -------------------------------------------------------------------------------
+# extinction
+# -------------------------------------------------------------------------------
 
 # add extinction from Lauren Anderson's paper!
 hdulist = fits.open('data/photoParallaxAnderson17.fits')
@@ -275,29 +299,335 @@ xx = hdulist[1].data
 
 # match in RA and DEC
 lauren_cat = SkyCoord(ra=xx['ra']*u.degree, dec=xx['dec']*u.degree)
-tgas_cat = SkyCoord(ra=tgas_data['RA']*u.degree, dec=tgas_data['DEC']*u.degree)
+tgas_cat = SkyCoord(ra=training_labels['ra']*u.degree, dec=training_labels['dec']*u.degree)
 id_tgas, id_lauren, d2d, d3d = lauren_cat.search_around_sky(tgas_cat, 0.001*u.degree)
 
-tgas_data = tgas_data[id_tgas]
 xx = xx[id_lauren]
-apogee_data = apogee_data[id_tgas]  
-print('matched entries: {}'.format(len(tgas_data)))
+training_labels = training_labels[id_tgas]
+#data_norm = data_norm[:, id_tgas, :]
+print('matched entries APOGEE-TGAS-Anderson: {}'.format(len(training_labels)))
 
-extinction = xx['dust E(B-V)']
-            
-Q = 10**(0.2*apogee_data['K']) * tgas_data['parallax']/100.                    # assumes parallaxes is in mas
-Q_err = tgas_data['parallax_error'] * 10**(0.2*apogee_data['K'])/100. 
+EBV = xx['dust E(B-V)']
+AV = 3.1 * EBV
 
-plt.scatter(apogee_data['TEFF'], apogee_data['LOGG'], c = apogee_data['FE_H'], vmin = -2., vmax = .5)
+# reddening coefficients from Schlafly & Finkbeiner 2011 # Hawkins et al. 2017
+J_RedCoeff = 0.709  # 0.72
+H_RedCoeff = 0.449  # 0.46
+K_RedCoeff = 0.302  # 0.30
+
+AJ = J_RedCoeff * EBV
+AH = H_RedCoeff * EBV
+AK = K_RedCoeff * EBV
+
+# -------------------------------------------------------------------------------
+# calculate absolute magnitudes
+# -------------------------------------------------------------------------------
+
+m_J_corr = training_labels['J'] - AJ
+m_H_corr = training_labels['H'] - AH
+m_K_corr = training_labels['K'] - AK
+
+Q_J = 10**(0.2 * m_J_corr) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_J_err = training_labels['parallax_error'] * 10**(0.2 * m_J_corr)/100. 
+Q_H = 10**(0.2 * m_H_corr) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_H_err = training_labels['parallax_error'] * 10**(0.2 * m_H_corr)/100.                  
+Q_K = 10**(0.2 * m_K_corr) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_K_err = training_labels['parallax_error'] * 10**(0.2 * m_K_corr)/100. 
+                   
+Q_J_nocorr = 10**(0.2 * training_labels['J']) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_J_err_nocorr = training_labels['parallax_error'] * 10**(0.2 * training_labels['J'])/100. 
+Q_H_nocorr = 10**(0.2 * training_labels['H']) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_H_err_nocorr = training_labels['parallax_error'] * 10**(0.2 * training_labels['H'])/100.                  
+Q_K_nocorr = 10**(0.2 * training_labels['K']) * training_labels['parallax']/100.                    # assumes parallaxes is in mas
+Q_K_err_nocorr = training_labels['parallax_error'] * 10**(0.2 * training_labels['K'])/100. 
+                          
+# -------------------------------------------------------------------------------
+# calculate colors
+# -------------------------------------------------------------------------------
+
+JminusH = m_J_corr - m_H_corr
+JminusK = m_J_corr - m_K_corr
+HminusK = m_H_corr - m_K_corr
+
+JminusH_nocorr = training_labels['J'] - training_labels['H']
+JminusK_nocorr = training_labels['J'] - training_labels['K']
+HminusK_nocorr = training_labels['H'] - training_labels['K']
+
+# -------------------------------------------------------------------------------
+# add columns to training_labels
+# -------------------------------------------------------------------------------
+
+training_labels.add_column(Column(EBV), name='E(B-V)')
+training_labels.add_column(Column(AV), name='A_V')
+training_labels.add_column(Column(AJ), name='A_J')
+training_labels.add_column(Column(AH), name='A_H')
+training_labels.add_column(Column(AK), name='A_K')
+training_labels.add_column(Column(m_J_corr), name='J_corr')
+training_labels.add_column(Column(m_H_corr), name='H_corr')
+training_labels.add_column(Column(m_K_corr), name='K_corr')
+training_labels.add_column(Column(JminusH), name='J-H')
+training_labels.add_column(Column(JminusK), name='J-K')
+training_labels.add_column(Column(HminusK), name='H-K')
+training_labels.add_column(Column(JminusH_nocorr), name='J-H_nocorr')
+training_labels.add_column(Column(JminusK_nocorr), name='J-K_nocorr')
+training_labels.add_column(Column(HminusK_nocorr), name='H-K_nocorr')
+training_labels.add_column(Column(Q_J), name='Q_J')
+training_labels.add_column(Column(Q_J_err), name='Q_J_ERR')
+training_labels.add_column(Column(Q_H), name='Q_H')
+training_labels.add_column(Column(Q_H_err), name='Q_H_ERR')
+training_labels.add_column(Column(Q_K), name='Q_K')
+training_labels.add_column(Column(Q_K_err), name='Q_K_ERR')
+training_labels.add_column(Column(Q_J_nocorr), name='Q_J_NOCORR')
+training_labels.add_column(Column(Q_J_err_nocorr), name='Q_J_NOCORR_ERR')
+training_labels.add_column(Column(Q_H_nocorr), name='Q_H_NOCORR')
+training_labels.add_column(Column(Q_H_err_nocorr), name='Q_H_NOCORR_ERR')
+training_labels.add_column(Column(Q_K_nocorr), name='Q_K_NOCORR')
+training_labels.add_column(Column(Q_K_err_nocorr), name='Q_K_NOCORR_ERR')
+
+# -------------------------------------------------------------------------------
+# plots
+# -------------------------------------------------------------------------------
+
+cm = plt.cm.get_cmap('viridis')
+sc = plt.scatter(training_labels['TEFF'], JminusH, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(J-H)_{corr}$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/JH_corr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], JminusK, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(J-K)_{corr}$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/JK_corr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], HminusK, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(H-K)_{corr}$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/HK_corr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], JminusH_nocorr, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(J-H)$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/JH_nocorr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], JminusK_nocorr, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(J-K)$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/JK_nocorr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], HminusK_nocorr, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$(H-K)$')
+plt.ylim(-1, 1)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/HK_nocorr.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], training_labels['LOGG'], c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
 plt.xlim(5700, 3700)
 plt.xlabel(r'$T_{eff}$')
 plt.ylabel(r'$\log g$')
 plt.ylim(4, 0)
-plt.colorbar()
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/teff_logg.png')
+plt.close()
 
-plt.scatter(apogee_data['TEFF'], Q, c = apogee_data['FE_H'], vmin = -2., vmax = .5)
+sc = plt.scatter(training_labels['TEFF'], Q_K, c = training_labels['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
 plt.xlim(5700, 3700)
 plt.ylim(-0.1, 5)
 plt.xlabel(r'$T_{eff}$')
-plt.ylabel(r'$Q$')
-plt.colorbar()
+plt.ylabel(r'$Q_{K, corr}$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/teff_QK.png')
+plt.close()
+
+# -------------------------------------------------------------------------------
+# cut in logg... 
+# -------------------------------------------------------------------------------
+
+cut = np.logical_and(training_labels['LOGG'] <= 2.5, training_labels['LOGG'] > 0.)
+training_labels2 = training_labels[cut]
+#data_norm = data_norm[:, cut, :]
+print('logg <= 2.5 cut: {}'.format(len(training_labels2)))
+
+# -------------------------------------------------------------------------------
+# plots training set
+# -------------------------------------------------------------------------------
+
+sc = plt.scatter(training_labels2['TEFF'], training_labels2['LOGG'], c = training_labels2['FE_H'], vmin = -2., vmax = .5, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$[Fe/H]$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$\log g$')
+plt.ylim(4, 0)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.title(r'$\log g \leq 2.5,\, {}$ stars'.format(len(training_labels2)))
+plt.savefig('data/training_set_plots/teff_logg_giants.png')
+plt.close()
+
+plt.title(r'${}$ stars'.format(len(training_labels2)))
+plt.hist(training_labels2['FE_H'])
+plt.xlabel('$[Fe/H]$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/hist_feh_giants.png')
+plt.close()
+
+plt.title(r'${}$ stars'.format(len(training_labels2)))
+plt.hist(training_labels2['TEFF'])
+plt.xlabel('$T_{eff}$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/hist_teff_giants.png')
+plt.close()
+
+plt.title(r'${}$ stars'.format(len(training_labels2)))
+plt.hist(training_labels2['Q_J'])
+plt.xlabel('$Q_J$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_Q_J_giants.png')
+plt.close()
+
+plt.title(r'${}$ stars'.format(len(training_labels2)))
+plt.hist(training_labels2['Q_K'])
+plt.xlabel('$Q_K$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_Q_K_giants.png')
+plt.close()
+
+plt.title(r'${}$ stars'.format(len(training_labels2)))
+plt.hist(training_labels2['Q_H'])
+plt.xlabel('$Q_H$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_Q_H_giants.png')
+plt.close()
+
+bins = np.linspace(-2, 1, 20)
+plt.hist(training_labels['FE_H'], bins, label = 'APOGEE-TGAS: {}'.format(len(training_labels)))
+plt.hist(training_labels2['FE_H'], bins, color = 'r', label = r'cut $\log g \leq 2.5$: {}'.format(len(training_labels2)))
+plt.xlabel('$[Fe/H]$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.yscale('log')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_feh_all.png')
+plt.close()
+
+bins = np.linspace(3000, 8000, 20)
+plt.hist(training_labels['TEFF'], bins, label = 'APOGEE-TGAS: {}'.format(len(training_labels)))
+plt.hist(training_labels2['TEFF'], bins, color = 'r', label = r'cut $\log g \leq 2.5$: {}'.format(len(training_labels2)))
+plt.xlabel('$T_{eff}$')
+plt.yscale('log')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_teff_all.png')
+plt.close()
+
+bins = np.linspace(0, 25, 25)
+plt.hist(training_labels['Q_J'], bins, label = 'APOGEE-TGAS: {}'.format(len(training_labels)))
+plt.hist(training_labels2['Q_J'], bins, color = 'r', label = r'cut $\log g \leq 2.5$: {}'.format(len(training_labels2)))
+plt.xlabel('$Q_J$')
+plt.yscale('log')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.legend()
+plt.savefig('data/training_set_plots/hist_Q_J_all.png')
+plt.close()
+
+cm = plt.cm.get_cmap('viridis')
+sc = plt.scatter(training_labels['TEFF'], training_labels['Q_K'], c = training_labels['A_K'], vmin = 0., vmax = .1, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$A_K$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.ylim(1., 0.)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$Q_{K, corr}$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/teff_QK_colorA.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], training_labels['Q_J'], c = training_labels['A_J'], vmin = 0., vmax = .1, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$A_J$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.ylim(1., 0.)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$Q_{J, corr}$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/teff_QJ_colorA.png')
+plt.close()
+
+sc = plt.scatter(training_labels['TEFF'], training_labels['Q_H'], c = training_labels['A_H'], vmin = 0., vmax = .1, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$A_H$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.ylim(1., 0.)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$Q_{H, corr}$')
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.savefig('data/training_set_plots/teff_QH_colorA.png')
+plt.close() 
+
+sc = plt.scatter(training_labels2['TEFF'], training_labels2['LOGG'], c = training_labels2['A_K'], vmin = 0., vmax = .1, cmap = cm)
+cbar = plt.colorbar(sc)
+cbar.set_label(r'$A_K$', rotation=270, size=12, labelpad = 10)
+plt.xlim(5700, 3700)
+plt.xlabel(r'$T_{eff}$')
+plt.ylabel(r'$\log g$')
+plt.ylim(4, 0)
+plt.tick_params(axis=u'both', direction='in', which='both')
+plt.title(r'$\log g \leq 2.5,\, {}$ stars'.format(len(training_labels2)))
+plt.savefig('data/training_set_plots/teff_logg_colorA_giants.png')
+plt.close()
+# -------------------------------------------------------------------------------
+# reduce spectra to training set 
+# -------------------------------------------------------------------------------
+
+f = open('data/training_labels_apogee_tgas_giants.pickle', 'w')
+pickle.dump(training_labels2, f)
+f.close()
+
+training_labels2.write('data/training_labels_apogee_tgas_giants.fits', format='fits')
+
+#f = open('data/apogee_spectra_norm_giants.pickle', 'w')
+#pickle.dump(data_norm, f)
+#f.close()
+
+# -------------------------------------------------------------------------------'''
+
