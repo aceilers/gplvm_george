@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import pickle
-from astropy.table import Table, Column
+from astropy.table import Table, Column, vstack
 import seaborn as sns
 from astropy.io import fits
 
@@ -67,11 +67,11 @@ def NN(index, chi2, labels):
     return labels[np.argmin(chi2[:, index]), :], np.argmin(chi2[:, index])
 
 
-'''# -------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
 # load spectra and labels (giant stars)
 # -------------------------------------------------------------------------------
 
-f = open('data/training_labels_apogee_tgas_giants.pickle', 'r')    
+'''f = open('data/training_labels_apogee_tgas_giants.pickle', 'r')    
 training_labels = pickle.load(f)
 f.close()
 
@@ -98,21 +98,37 @@ ivars = (1./(spectra[:, :, 2]**2)).T
         
 # -------------------------------------------------------------------------------
 # load spectra and labels (validation set)
-# -------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------                                  
 
-#hdulist = fits.open('data/training_labels_apogee_tgas_validation.fits')
-#training_labels_validation = hdulist[1].data
+hdulist = fits.open('data/training_labels_apogee_tgas_validation.fits')
+training_labels_validation = hdulist[1].data
                                     
-f = open('data/training_labels_apogee_tgas_validation.pickle', 'r')    
-training_labels_validation = pickle.load(f)
-f.close()
+good = training_labels_validation['parallax']/training_labels_validation['parallax_error'] > 9
+training_labels_validation = training_labels_validation[good]
 
 f = open('data/apogee_spectra_norm_validation.pickle', 'r')    
 spectra_validation = pickle.load(f)
-f.close()                 
+f.close() 
+
+spectra_validation = spectra_validation[:, good, :]                
 
 fluxes_validation = spectra_validation[:, :, 1].T
 ivars_validation = (1./(spectra_validation[:, :, 2]**2)).T 
+
+all_fluxes = np.vstack([fluxes, fluxes_validation])
+all_ivars = np.vstack([ivars, ivars_validation])
+
+# -------------------------------------------------------------------------------
+# get validation set from 10% of training set
+# -------------------------------------------------------------------------------
+
+training_labels = Table(training_labels)
+training_labels_validation = Table(training_labels_validation)
+all_training_labels = vstack([training_labels, training_labels_validation])
+all_ind = np.arange(len(all_training_labels))
+
+# training set contains 90% of data
+N = int(len(all_training_labels) - np.ceil(len(all_training_labels) / 10.))
 
 # -------------------------------------------------------------------------------
 # latex
@@ -138,23 +154,43 @@ plot_limits['Q_K'] = (0, 1.2)
 labels = np.array(['TEFF', 'LOGG', 'FE_H', 'Q_K']) #, 'ALPHA_M', 'Q_MAG', 'N_FE', 'C_FE'])
 Nlabels = len(labels)
 latex_labels = [latex[l] for l in labels]
-tr_label_input, tr_var_input = make_label_input(labels, training_labels)
-tr_label_validation, tr_var_validation = make_label_input(labels, training_labels_validation)
+tr_label_input, tr_var_input = make_label_input(labels, all_training_labels)
+#tr_label_validation, tr_var_validation = make_label_input(labels, training_labels_validation)
 print(Nlabels, tr_label_input.shape, tr_var_input.shape, fluxes.shape, ivars.shape) 
+
+# -------------------------------------------------------------------------------
+# take random indices
+# -------------------------------------------------------------------------------
+
+np.random.seed(34)
+indices = np.arange(all_fluxes.shape[0])
+np.random.shuffle(indices)
+ind_train = indices[:N]
+ind_validation = indices[N:]
 
 # -------------------------------------------------------------------------------
 # input data
 # -------------------------------------------------------------------------------
 
-X = fluxes
-X_ivar = ivars
-Y = tr_label_input
-N, D = fluxes.shape
-N, L = tr_label_input.shape
+#X = fluxes
+#X_ivar = ivars
+#Y = tr_label_input
+#N, D = fluxes.shape
+#N, L = tr_label_input.shape
+#
+#X2 = fluxes_validation
+#X2_ivar = ivars_validation
+#N2, D = fluxes_validation.shape
 
-X2 = fluxes_validation
-X2_ivar = ivars_validation
-N2, D = fluxes_validation.shape
+X = all_fluxes[ind_train, :]
+X_ivar = all_ivars[ind_train, :]
+Y = tr_label_input[ind_train, :]
+N, D = all_fluxes.shape
+N, L = tr_label_input[ind_train, :].shape
+
+X2 = all_fluxes[ind_validation, :]
+X2_ivar = all_ivars[ind_validation, :]
+N2, D = all_fluxes[ind_validation, :].shape
 
 # -------------------------------------------------------------------------------
 # validation with NN
@@ -164,7 +200,7 @@ chi2 = Chi2_Matrix(X, X_ivar, X2, X2_ivar)
 
 plt.imshow(1./chi2, interpolation = None, cmap = 'viridis')
 plt.colorbar()
-plt.savefig('plots/NN_mag/chi2_giants_asym_validation.png')
+plt.savefig('plots/NN_mag/chi2_asym_new_val.png')
 
 new_labels = np.zeros((N2, L))
 
@@ -175,14 +211,15 @@ for i in range(N2):
 
 for i, l in enumerate(labels):
 
-    orig = tr_label_validation[:, i]
+    orig = tr_label_input[ind_validation, i]
     gp_values = new_labels[:, i]
     scatter = np.round(np.std(orig - gp_values), 5)
-    bias = np.round(np.mean(orig - gp_values), 5)    
+    bias = np.round(np.mean(orig - gp_values), 5) 
+    chi2_label = np.round(np.sum((orig - gp_values)**2 / tr_var_input[ind_validation, i]), 4)
     
     xx = [-10000, 10000]
     plt.figure(figsize=(6, 6))
-    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1}'.format(bias, scatter), marker = 'o')
+    plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1} \n $\chi^2$ = {2}'.format(bias, scatter, chi2_label), marker = 'o')
     plt.plot(xx, xx, color=colors[2], linestyle='--')
     plt.xlabel(r'reference labels {}'.format(latex[l]), size=14)
     plt.ylabel(r'inferred values {}'.format(latex[l]), size=14)
@@ -191,8 +228,39 @@ for i, l in enumerate(labels):
     plt.ylim(plot_limits[l])
     plt.tight_layout()
     plt.legend(loc=2, fontsize=14, frameon=True)
-    plt.savefig('plots/NN_mag/1to1_{0}_asym_validation.png'.format(l))
+    plt.savefig('plots/NN_mag/1to1_{0}_asym_new_val.png'.format(l))
     plt.close()
+    
+    if l == 'Q_K' or l == 'Q_L':
+        orig = 5. * (np.log10(tr_label_input[ind_validation, i]))
+        gp_values = 5. * (np.log10(new_labels[:, i]))
+        scatter = np.round(np.std(orig - gp_values), 4)
+        bias = np.round(np.mean(orig - gp_values), 4)    
+        if l == 'Q_K':
+            chi2_label = np.round(np.sum((orig - gp_values)**2 / all_training_labels['K_ERR'][ind_validation]), 4)
+        elif l == 'Q_L':
+            chi2_label = np.round(np.sum((orig - gp_values)**2 / all_training_labels['L_ERR'][ind_validation]), 4)        
+        xx = [-10000, 10000]
+        plt.figure(figsize=(6, 6))
+        plt.scatter(orig, gp_values, color=colors[-2], label=' bias = {0} \n scatter = {1} \n $\chi^2$ = {2}'.format(bias, scatter, chi2_label), marker = 'o')
+        plt.plot(xx, xx, color=colors[2], linestyle='--')
+        if l == 'Q_K':
+            plt.xlabel(r'reference labels $M_{K}$', size=12)
+            plt.ylabel(r'inferred values $M_{K}$', size=12)
+        elif l == 'Q_L':
+            plt.xlabel(r'reference labels $M_{L}$', size=12)
+            plt.ylabel(r'inferred values $M_{L}$', size=12)            
+        plt.tick_params(axis=u'both', direction='in', which='both')
+        plt.xlim(-5, 0)
+        plt.ylim(-5, 0)
+        plt.tight_layout()
+        plt.legend(loc=2, fontsize=14, frameon=True)
+        plt.title('#stars: {0}'.format(len(ind_validation)), fontsize=12)
+        if l == 'Q_K':        
+            plt.savefig('plots/NN_mag/1to1_M_K_asym_new_val.png')
+        elif l == 'Q_L':        
+            plt.savefig('plots/NN_mag/1to1_M_L_asym_new_val.png')
+            plt.close()
 
 ## -------------------------------------------------------------------------------'''
 ## cross validation with NN

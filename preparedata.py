@@ -78,6 +78,13 @@ cut = np.logical_and(apogee_data['LOGG'] <= 2.5, apogee_data['LOGG'] > 0.)
 apogee_data = apogee_data[cut]
 tgas_data = tgas_data[cut]
 print('logg <= 2.5 cut: {}'.format(len(apogee_data)))
+
+# -------------------------------------------------------------------------------
+# load spectra and labels (RGB stars)
+# -------------------------------------------------------------------------------
+
+hdulist = fits.open('data/RGB.fits')
+apogee_data = hdulist[1].data
             
 # -------------------------------------------------------------------------------
 # get APOGEE spectra
@@ -260,7 +267,7 @@ def NormalizeData(dataall):
 # normalize spectra
 # -------------------------------------------------------------------------------
 
-file_name = 'apogee_spectra_norm_validation.pickle'
+file_name = 'apogee_spectra_norm_RGB.pickle'
 
 destination = './data/' + file_name
 if not os.path.isfile(destination):
@@ -579,6 +586,7 @@ plt.ylim(1., 0.)
 plt.xlabel(r'$T_{eff}$')
 plt.ylabel(r'$Q_{K, corr}$')
 plt.tick_params(axis=u'both', direction='in', which='both')
+plt.title(r'${}$ stars'.format(len(training_labels)))
 plt.savefig('data/training_set_plots/teff_QK_colorA.png')
 plt.close()
 

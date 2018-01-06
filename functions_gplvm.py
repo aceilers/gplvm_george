@@ -207,8 +207,6 @@ def lnL_Z_old(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask = None, 
     L = Y.shape[1]
     Z = np.reshape(pars, (N, Q)) 
     theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params    
-    kernel1 = kernelRBF(Z, theta_rbf, theta_band)
-    kernel2 = kernelRBF(Z, gamma_rbf, gamma_band)
     if X_mask is None:
         X_mask = np.ones_like(X).astype(bool)
     if Y_mask is None:
@@ -225,6 +223,7 @@ def lnL_Z_old(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask = None, 
         
     for d in range(D):
         good_stars = X_mask[:, d]
+        kernel1 = kernelRBF(Z, theta_rbf[d], theta_band)
         thiskernel = kernel1[good_stars, :][:, good_stars]
         K1C = thiskernel + np.diag(X_var[good_stars, d])
 #        if nervous:
@@ -238,6 +237,7 @@ def lnL_Z_old(pars, X, Y, hyper_params, Z_initial, X_var, Y_var, X_mask = None, 
     
     for l in range(L):
         good_stars = Y_mask[:, l]
+        kernel2 = kernelRBF(Z, gamma_rbf[l], gamma_band)
         thiskernel = kernel2[good_stars, :][:, good_stars]
         K2C = thiskernel + np.diag(Y_var[good_stars, l])
         if nervous:
@@ -546,37 +546,80 @@ def lnL_h(pars, X, Y, Z, Z_initial, X_var, Y_var, X_mask = None, Y_mask = None):
         return np.inf, np.inf * np.ones_like(pars) # hack! check again!
 
 
-def dLdhyper(data, Z, band, rbf, K, factor):  
+def dLdhyper_old(data, Z, band, rbf, K, factor):  
     
-    K_inv_data = cho_solve(factor, data)
+    K_inv = np.linalg.inv(K)
 
     dKdrbf = 1./rbf * K  
     B = B_matrix(Z)
     dKdband = K * B
     
-    dLdrbf = np.sum(dLdK(K_inv_data, data) * dKdrbf)        
-    dLdband = np.sum(dLdK(K_inv_data, data) * dKdband)    
+    dLdrbf = np.sum(dLdK(K_inv, data) * dKdrbf)        
+    dLdband = np.sum(dLdK(K_inv, data) * dKdband)    
     
     return np.array([dLdrbf, dLdband])
+
+    
+def dLdhyper(data, Z, band, rbf, K, factor):  
+    
+    K_inv_data = cho_solve(factor, data) 
+    
+    dKdrbf = 1./rbf * K  
+    B = B_matrix(Z)
+    dKdband = K * B
+    
+    #K_inv_rbf = cho_solve(factor, dKdrbf)
+    #dLdrbf = np.sum(-0.5 * K_inv_rbf + 0.5 * np.dot(np.dot(data, cho_solve(factor, data)) , K_inv_rbf))
+    #dLdrbf = np.sum(-0.5 * K_inv_rbf + 0.5 * cho_solve(factor, np.dot(np.dot(data, data.T), K_inv_rbf)))
+    
+    #K_inv_band = cho_solve(factor, dKdband)
+    #dLdband = np.sum(-0.5 * K_inv_band + 0.5 * cho_solve(factor, np.dot(np.dot(data, data.T), K_inv_band)))
+    dLdband = np.sum(0.5 * K_inv_data * np.dot(K_inv_data, dKdband)) - 0.5 * np.trace(cho_solve(factor, dKdband))
+
+    dLdrbf = np.sum(0.5 * K_inv_data * np.dot(K_inv_data, dKdrbf)) - 0.5 * np.trace(cho_solve(factor, dKdrbf))
+    #dLdband = (-0.5 * np.trace(cho_solve(factor, dKdband)))
+    #dLdrbf = (-0.5 * np.trace(cho_solve(factor, dKdrbf)))
+    
+    return np.array([dLdrbf, dLdband])
+    
+    
+#def dLdhyper(data, Z, band, rbf, K, factor):     
+#    
+#    K_inv_data = cho_solve(factor, data)
+#    B = B_matrix(Z)
+#    dKdrbf = 1./rbf * K
+#    dKdband = K * B
+#    
+#    gradL = np.zeros(Z)
+#    N, Q = Z.shape # N might not be the same as global N, if labels have been dropped
+#    for n in range(N):
+#        lhat = np.zeros((N))
+#        lhat[n] = 1.
+#        vec = prefactor[:, n, None] * (Z - Z[n, :])
+#        gradL[n, :] += K_inv_data[n] * np.dot(K_inv_data, vec) - np.dot(cho_solve(factor, lhat), vec)
+#    
+#    return gradL
 
 
 # -------------------------------------------------------------------------------
 # prediction
 # -------------------------------------------------------------------------------
 
-def mean_var(Z, Zj, data, data_var, K, rbf, band):
+def mean_var(Z, Zj, data, data_var, rbf, band):
     N = Z.shape[0]
     B = np.zeros((N, ))
     for i in range(N):
         B[i] = -0.5 * np.dot((Z[i, :] - Zj).T, (Z[i, :] - Zj))   
-    k_Z_zj = rbf * np.exp(band * B)
     
     # prediction for test object: loop over d is in previous function
     if data.ndim == 1:
-        inv_K = np.linalg.inv(K + np.diag(data_var))
-        mean = np.dot(data.T, np.dot(inv_K, k_Z_zj))
-        var = rbf - np.dot(k_Z_zj.T, np.dot(inv_K, k_Z_zj))
-        return mean, var, k_Z_zj, inv_K
+        K = kernelRBF(Z, rbf, band)
+        KC = K + np.diag(data_var)
+        k_Z_zj = rbf * np.exp(band * B)
+        factor = cho_factor(KC, overwrite_a = True)
+        mean = np.dot(data.T, cho_solve(factor, k_Z_zj))
+        var = rbf - np.dot(k_Z_zj.T, cho_solve(factor, k_Z_zj))
+        return mean, var, k_Z_zj, factor
     
     # prediction for training objects
     else:
@@ -584,33 +627,36 @@ def mean_var(Z, Zj, data, data_var, K, rbf, band):
         mean_j = []
         var_j = []
         for d in range(D):
-            inv_K = np.linalg.inv(K + np.diag(data_var[:, d]))
-            mean_j.append(np.dot(data[:, d].T, np.dot(inv_K, k_Z_zj)))
-            var_j.append(rbf - np.dot(k_Z_zj.T, np.dot(inv_K, k_Z_zj)))        
+            K = kernelRBF(Z, rbf[d], band)
+            KC = K + np.diag(data_var[:, d])
+            k_Z_zj = rbf[d] * np.exp(band * B)
+            factor = cho_factor(KC, overwrite_a = True)
+            mean_j.append(np.dot(data[:, d].T, cho_solve(factor, k_Z_zj)))
+            var_j.append(rbf[d] - np.dot(k_Z_zj.T, cho_solve(factor, k_Z_zj)))        
         return np.array(mean_j), np.array(var_j), k_Z_zj
     
 
 
-def lnL_znew(pars, X_new_j, X_new_var_j, Z, data, data_var, K, rbf, band):    
+def lnL_znew(pars, X_new_j, X_new_var_j, Z, data, data_var, rbf, band):    
     Zj = pars
     D = X_new_j.shape[0]
     
     L = 0.
     gradL = 0.
     for d in range(D):
-        mean, var, k_Z_zj, inv_K = mean_var(Z, Zj, data[:, d], data_var[:, d], K, rbf, band)
+        mean, var, k_Z_zj, factor = mean_var(Z, Zj, data[:, d], data_var[:, d], rbf[d], band)
         assert var > 0.
         
-        #L += -0.5 * np.dot((X_new_j[d] - mean).T, (X_new_j[d] - mean)) / \
-        #                  (var + X_new_var_j[d]) - 0.5 * np.log(var + X_new_var_j[d]) 
+        L += -0.5 * np.dot((X_new_j[d] - mean).T, (X_new_j[d] - mean)) / \
+                          (var + X_new_var_j[d]) - 0.5 * np.log(var + X_new_var_j[d]) 
         
         # do not use variance of model for the prediction for the moment...
-        L += -0.5 * np.dot((X_new_j[d] - mean).T, (X_new_j[d] - mean)) / \
-                          (X_new_var_j[d]) - 0.5 * np.log( X_new_var_j[d])
+        #L += -0.5 * np.dot((X_new_j[d] - mean).T, (X_new_j[d] - mean)) / \
+        #                  (X_new_var_j[d]) - 0.5 * np.log( X_new_var_j[d])
         
-        dLdmu, dLdsigma2 = dLdmusigma2(X_new_j[d], mean, (X_new_var_j[d]))
-        #dLdmu, dLdsigma2 = dLdmusigma2(X_new_j[d], mean, (var + X_new_var_j[d]))
-        dmudZ, dsigma2dZ = dmusigma2dZ(data[:, d], inv_K, Z, Zj, k_Z_zj, band)
+        #dLdmu, dLdsigma2 = dLdmusigma2(X_new_j[d], mean, (X_new_var_j[d]))
+        dLdmu, dLdsigma2 = dLdmusigma2(X_new_j[d], mean, (var + X_new_var_j[d]))
+        dmudZ, dsigma2dZ = dmusigma2dZ(data[:, d], factor, Z, Zj, k_Z_zj, band)
         
         gradL += np.dot(dLdmu, dmudZ) + np.dot(dLdsigma2, dsigma2dZ)
     
@@ -623,14 +669,12 @@ def dLdmusigma2(X_new_j, mean, var):
     return dLdmu, dLdsigma2
 
 
-def dmusigma2dZ(data, inv_K, Z, Zj, k_Z_zj, band):
-    term1 = np.dot(data.T, inv_K)
+def dmusigma2dZ(data, factor, Z, Zj, k_Z_zj, band):
     term2 = k_Z_zj[:, None] * band * (Z - Zj)
-    dmudZ = np.dot(term1, term2)    
+    Kinv_term2 = cho_solve(factor, term2)
+    dmudZ = np.dot(data.T, Kinv_term2)    
     
-    term3 = -2. * np.dot(k_Z_zj , inv_K)
-    dsigma2dZ = np.dot(term3, term2)
-    
+    dsigma2dZ = -2. * np.dot(k_Z_zj , Kinv_term2)    
     return dmudZ, dsigma2dZ
 
 
@@ -639,16 +683,16 @@ def predictX(X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params, y0, z0
     N, Q = Z_final.shape
     N, L = Y.shape
     theta_rbf, theta_band, gamma_rbf, gamma_band = hyper_params
-    K1 = kernelRBF(Z_final, theta_rbf, theta_band)
-    K2 = kernelRBF(Z_final, gamma_rbf, gamma_band)
+    #K1 = kernelRBF(Z_final, theta_rbf, theta_band)
+    #K2 = kernelRBF(Z_final, gamma_rbf, gamma_band)
 
-    res = op.minimize(lnL_znew, x0 = z0, args = (X_new, X_new_var, Z_final, X, X_var, K1, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
+    res = op.minimize(lnL_znew, x0 = z0, args = (X_new, X_new_var, Z_final, X, X_var, theta_rbf, theta_band), method = 'L-BFGS-B', jac = True, 
                    options={'gtol':1e-12, 'ftol':1e-12})   
     Z_new = res.x
     success_z = res.success
     print('latent variable optimization - success: {}'.format(res.success))
     
-    res = op.minimize(lnL_ynew, x0 = y0, args = (Z_new, Z_final, Y, Y_var, K2, gamma_rbf, gamma_band), method = 'L-BFGS-B', jac = True, 
+    res = op.minimize(lnL_ynew, x0 = y0, args = (Z_new, Z_final, Y, Y_var, gamma_rbf, gamma_band), method = 'L-BFGS-B', jac = True, 
                    options={'gtol':1e-12, 'ftol':1e-12})   
     Y_new = res.x
     success_y = res.success
@@ -657,7 +701,7 @@ def predictX(X_new, X_new_var, X, X_var, Y, Y_var, Z_final, hyper_params, y0, z0
     return Z_new, Y_new, success_z, success_y
 
 
-def lnL_ynew(pars, Zj, Z, data, data_var, K, rbf, band):    
+def lnL_ynew(pars, Zj, Z, data, data_var, rbf, band):    
     
     lj = pars
     L = data.shape[1]
@@ -665,7 +709,7 @@ def lnL_ynew(pars, Zj, Z, data, data_var, K, rbf, band):
     like = 0.
     gradL = []
     for l in range(L):
-        mean, var, k_Z_zj, inv_K = mean_var(Z, Zj, data[:, l], data_var[:, l], K, rbf, band)
+        mean, var, k_Z_zj, factor = mean_var(Z, Zj, data[:, l], data_var[:, l], rbf[l], band)
         #assert var > 0.
 
         like += -0.5 * np.dot((lj[l] - mean).T, (lj[l] - mean)) #/ var - 0.5 * np.log(var) 
